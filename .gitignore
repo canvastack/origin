@@ -1,0 +1,8 @@
+/.buildpath
+/.project
+.settings
+*.phpx
+*.zip
+*/.bak
+*.bak
+/.backups

@@ -238,13 +238,13 @@ $table->render();
 
 Comprehensive documentation is available in the `docs/` directory:
 
-- **[Form Builder API Reference](docs/FormBuilder/API_REFERENCE.md)** - Complete API documentation
-- **[Objects Class](docs/FormBuilder/OBJECTS_CLASS.md)** - Main form class methods
-- **[Element Traits](docs/FormBuilder/ELEMENT_TRAITS.md)** - Form element components
-- **[Security Guidelines](docs/FormBuilder/SECURITY.md)** - Security best practices
-- **[Accessibility Guidelines](docs/FormBuilder/ACCESSIBILITY.md)** - WCAG compliance guide
-- **[FormConstants](docs/FormBuilder/FORMCONSTANTS.md)** - Available constants
-- **[Migration Guide](docs/FormBuilder/MIGRATION_GUIDE.md)** - Upgrade instructions
+- **[Form Builder API Reference](docs/COMPONENTS/FORM/API_REFERENCE.md)** - Complete API documentation
+- **[Objects Class](docs/COMPONENTS/FORM/OBJECTS_CLASS.md)** - Main form class methods
+- **[Element Traits](docs/COMPONENTS/FORM/ELEMENT_TRAITS.md)** - Form element components
+- **[Security Guidelines](docs/COMPONENTS/FORM/SECURITY.md)** - Security best practices
+- **[Accessibility Guidelines](docs/COMPONENTS/FORM/ACCESSIBILITY.md)** - WCAG compliance guide
+- **[FormConstants](docs/COMPONENTS/FORM/FORMCONSTANTS.md)** - Available constants
+- **[Migration Guide](docs/COMPONENTS/FORM/MIGRATION_GUIDE.md)** - Upgrade instructions
 
 ## 🔧 Configuration
 
@@ -318,7 +318,7 @@ Do not create public GitHub issues for security vulnerabilities.
 
 | Component | Description | Documentation |
 |-----------|-------------|---------------|
-| **Form Builder** | Secure form generation with validation | [docs/FormBuilder/](docs/FormBuilder/) |
+| **Form Builder** | Secure form generation with validation | [docs/COMPONENTS/FORM/](docs/COMPONENTS/FORM/) |
 | **DataTables** | Server-side table processing | Coming soon |
 | **Charts** | Interactive chart components | Coming soon |
 | **Template Engine** | Layout and theme management | Coming soon |

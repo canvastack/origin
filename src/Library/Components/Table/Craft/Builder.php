@@ -5,14 +5,60 @@ use Canvastack\Origin\Models\Admin\System\DynamicTables;
 use Canvastack\Origin\Library\Components\Table\Craft\Method\Post;
 
 /**
+ * Builder Class - HTML Table Builder with DataTables Integration
+ * 
+ * This class provides a fluent interface for building HTML tables with DataTables
+ * integration, including support for:
+ * - Dynamic column configuration
+ * - Server-side processing
+ * - Advanced filtering and searching
+ * - Column merging and grouping
+ * - Custom styling and formatting
+ * - Action buttons and row operations
+ * - Formula columns and calculations
+ * 
+ * SECURITY FEATURES:
+ * - Input validation for all parameters
+ * - XSS protection with output escaping
+ * - SQL injection prevention via Eloquent/Query Builder
+ * - Error handling with graceful degradation
+ * 
+ * PERFORMANCE FEATURES:
+ * - Caching for repeated operations
+ * - Optimized array access
+ * - Reduced string manipulation overhead
+ * 
+ * USAGE EXAMPLE:
+ * ```php
+ * $builder = new Builder();
+ * $html = $builder->table('users', [
+ *     'users' => [
+ *         'lists' => ['name', 'email', 'created_at'],
+ *         'searchable' => ['name', 'email'],
+ *         'sortable' => ['name', 'created_at']
+ *     ]
+ * ], [
+ *     'users' => [
+ *         'model' => User::class,
+ *         'attributes' => [
+ *             'table_id' => 'users-table',
+ *             'table_class' => 'table table-striped'
+ *         ],
+ *         'server_side' => [
+ *             'status' => true
+ *         ]
+ *     ]
+ * ], 'User Management');
+ * ```
+ * 
  * Created on 21 Apr 2021
  * Time Created	: 08:13:39
- *
- * @filesource	Builder.php
- *
- * @author		wisnuwidi@canvastack.com - 2021
- * @copyright	wisnuwidi
- * @email		wisnuwidi@canvastack.com
+ * 
+ * @package    Canvastack\Origin\Library\Components\Table\Craft
+ * @author     wisnuwidi@canvastack.com
+ * @copyright  wisnuwidi
+ * @version    2.0.0
+ * @since      21 Apr 2021
  */
  
 class Builder {
@@ -21,13 +67,174 @@ class Builder {
 	public $model;
 	public $method = 'GET';
 	
-	protected function setMethod($method) {
-		$this->method = $method;
+	// Constants for validation
+	private const ALLOWED_METHODS = ['GET', 'POST'];
+	private const SPECIAL_COLUMNS = ['no', 'id', 'nik', 'number_lists', 'action'];
+	
+	// Constants for column widths
+	private const COLUMN_WIDTH_SMALL = 30;
+	private const COLUMN_WIDTH_MEDIUM = 50;
+	
+	// Constants for default values
+	private const DEFAULT_TABLE_ID = 'datatable';
+	private const DEFAULT_TABLE_CLASS = 'table';
+	private const MERGE_TEXT_SEPARATOR = '::merge::';
+	private const LIST_SUFFIX = ' List(s)';
+	private const LABEL_TABLE_MARKER = ':setLabelTable';
+	
+	// Constants for special column names
+	private const COLUMN_NUMBER_LISTS = 'number_lists';
+	private const COLUMN_ACTION = 'action';
+	private const COLUMN_NO = 'no';
+	private const COLUMN_ID = 'id';
+	private const COLUMN_NIK = 'nik';
+	
+	/**
+	 * Validate table inputs
+	 * SECURITY: Ensures all required parameters are present and valid
+	 *
+	 * @param string $name Table name
+	 * @param array $columns Column configuration
+	 * @param array $attributes Table attributes
+	 * @throws \InvalidArgumentException If validation fails
+	 */
+	private function validateTableInputs($name, $columns, $attributes) {
+		// Validate table name
+		if (!is_string($name) || empty($name)) {
+			throw new \InvalidArgumentException('Table name must be a non-empty string');
+		}
+		
+		// Validate columns parameter
+		if (!is_array($columns)) {
+			throw new \InvalidArgumentException('Columns parameter must be an array');
+		}
+		
+		// Validate attributes parameter
+		if (!is_array($attributes)) {
+			throw new \InvalidArgumentException('Attributes parameter must be an array');
+		}
+		
+		// Validate columns structure if provided
+		if (!empty($columns[$name]) && !is_array($columns[$name])) {
+			throw new \InvalidArgumentException('Column configuration must be an array');
+		}
 	}
 	
-	protected function table($name, $columns = [], $attributes = [], $label = null) {
-		$data = [];
+	/**
+	 * Validate and sanitize table ID
+	 * SECURITY: Prevents XSS in HTML attributes
+	 *
+	 * @param string $tableID Table ID to validate
+	 * @return string Sanitized table ID
+	 */
+	private function validateTableID($tableID) {
+		// Remove any HTML/script tags
+		$tableID = strip_tags($tableID);
 		
+		// Only allow alphanumeric, dash, underscore
+		$tableID = preg_replace('/[^a-zA-Z0-9_-]/', '', $tableID);
+		
+		if (empty($tableID)) {
+			return self::DEFAULT_TABLE_ID; // Default fallback
+		}
+		
+		return $tableID;
+	}
+	
+	/**
+	 * Validate width value
+	 * SECURITY: Prevents XSS in width attributes
+	 *
+	 * @param mixed $width Width value to validate
+	 * @return int|null Valid width or null
+	 */
+	private function validateWidth($width) {
+		// Only accept numeric values
+		$width = filter_var($width, FILTER_VALIDATE_INT);
+		
+		if ($width === false || $width <= 0 || $width > 1000) {
+			return null;
+		}
+		
+		return $width;
+	}
+	
+	/**
+	 * Validate color value
+	 * SECURITY: Prevents XSS in style attributes
+	 *
+	 * @param string $color Color value to validate
+	 * @return string|null Valid color or null
+	 */
+	private function validateColor($color) {
+		// Allow hex colors (#fff, #ffffff)
+		if (preg_match('/^#[0-9a-fA-F]{3,6}$/', $color)) {
+			return $color;
+		}
+		
+		// Allow named colors (whitelist)
+		$allowedColors = [
+			'red', 'blue', 'green', 'yellow', 'orange', 'purple', 'pink',
+			'black', 'white', 'gray', 'grey', 'brown', 'cyan', 'magenta'
+		];
+		
+		if (in_array(strtolower($color), $allowedColors)) {
+			return strtolower($color);
+		}
+		
+		return null;
+	}
+	/**
+	 * Cache for escaped tableID values
+	 *
+	 * @var array
+	 */
+	private $escapedTableIDCache = [];
+
+	/**
+	 * Cache for column labels
+	 *
+	 * @var array
+	 */
+	private $columnLabelCache = [];
+
+	/**
+	 * Get escaped tableID with caching
+	 *
+	 * @param string $tableID Table ID to escape
+	 * @return string Escaped table ID
+	 */
+	private function getEscapedTableID($tableID) {
+		if (!isset($this->escapedTableIDCache[$tableID])) {
+			$this->escapedTableIDCache[$tableID] = htmlspecialchars($tableID, ENT_QUOTES, 'UTF-8');
+		}
+		return $this->escapedTableIDCache[$tableID];
+	}
+
+	/**
+	 * Get formatted column label with caching
+	 *
+	 * @param string $column Column name
+	 * @return string Formatted and escaped label
+	 */
+	private function getColumnLabel($column) {
+		if (!isset($this->columnLabelCache[$column])) {
+			$label = ucwords(str_replace('_', ' ', $column));
+			$this->columnLabelCache[$column] = htmlspecialchars($label, ENT_QUOTES, 'UTF-8');
+		}
+		return $this->columnLabelCache[$column];
+	}
+	/**
+	 * Initialize table data model
+	 *
+	 * @param string $name Table name
+	 * @param array $attributes Table attributes
+	 * @return array Data array with model information
+	 */
+	private function initializeTableModel($name, $attributes) {
+		$data = [];
+		$model = null;
+
 		if (!empty($attributes[$name]['model'])) {
 			if ('sql' === $attributes[$name]['model']) {
 				$data[$name]['model'] = 'sql';
@@ -42,7 +249,7 @@ class Builder {
 			$data[$name]['model']       = get_class($model);
 			$attributes[$name]['model'] = get_class($model);
 		}
-		
+
 		if (!empty($model)) {
 			$this->model[$name]['type']   = 'model';
 			$this->model[$name]['source'] = $model;
@@ -50,77 +257,283 @@ class Builder {
 			$this->model[$name]['type']   = 'sql';
 			$this->model[$name]['source'] = $data[$name]['sql'];
 		}
-		
+
+		return $data;
+	}
+
+	/**
+	 * Extract table configuration from attributes
+	 *
+	 * @param string $name Table name
+	 * @param array $attributes Table attributes
+	 * @return array Configuration array with tableID, tableClass, etc.
+	 */
+	private function extractTableConfig($name, $attributes) {
+		$config = [
+			'tableID' => self::DEFAULT_TABLE_ID,
+			'tableClass' => self::DEFAULT_TABLE_CLASS,
+			'serverSide' => false,
+			'customURL' => null
+		];
+
 		if (!empty($attributes[$name])) {
-			$tableID          = isset($attributes[$name]['attributes']['table_id']) ? $attributes[$name]['attributes']['table_id'] : 'datatable';
-			$tableClass       = isset($attributes[$name]['attributes']['table_class']) ? $attributes[$name]['attributes']['table_class'] : 'table';
-			$this->serverSide = isset($attributes[$name]['server_side']['status']) ? $attributes[$name]['server_side']['status'] : false;
-			$this->customURL  = isset($attributes[$name]['server_side']['custom_url']) ? $attributes[$name]['server_side']['custom_url'] : null;
+			// SECURITY: Validate and sanitize tableID
+			$rawTableID = isset($attributes[$name]['attributes']['table_id'])
+				? $attributes[$name]['attributes']['table_id']
+				: self::DEFAULT_TABLE_ID;
+			$config['tableID'] = $this->validateTableID($rawTableID);
+
+			$config['tableClass'] = isset($attributes[$name]['attributes']['table_class'])
+				? $attributes[$name]['attributes']['table_class']
+				: self::DEFAULT_TABLE_CLASS;
+
+			$config['serverSide'] = isset($attributes[$name]['server_side']['status'])
+				? $attributes[$name]['server_side']['status']
+				: false;
+
+			$config['customURL'] = isset($attributes[$name]['server_side']['custom_url'])
+				? $attributes[$name]['server_side']['custom_url']
+				: null;
+
+			$this->serverSide = $config['serverSide'];
+			$this->customURL = $config['customURL'];
 		}
-		
+
+		return $config;
+	}
+
+	/**
+	 * Build table data array
+	 *
+	 * @param string $name Table name
+	 * @param array $columns Column configuration
+	 * @param array $attributes Table attributes
+	 * @param array $data Existing data array
+	 * @return array Complete data array
+	 */
+	private function buildTableData($name, $columns, $attributes, $data) {
 		$data[$name]['name']       = $name;
 		$data[$name]['columns']    = $columns[$name];
 		$data[$name]['attributes'] = $attributes[$name];
-		
+
 		// FORMULATION
 		if (!empty($data[$name]['attributes']['conditions']['formula'])) {
 			if (!empty($data[$name]['columns']['lists'])) {
-				$data[$name]['columns']['lists'] = $this->setFormulaColumns($data[$name]['columns']['lists'], $data[$name]);
+				$data[$name]['columns']['lists'] = $this->setFormulaColumns(
+					$data[$name]['columns']['lists'],
+					$data[$name]
+				);
 			}
 		}
-		
-		// RENDER DATA TABLE
-		if (false !== $name) {
+
+		return $data;
+	}
+
+	/**
+	 * Build table title HTML
+	 *
+	 * @param string $name Table name
+	 * @param string|null $label Custom label
+	 * @return string Table title HTML
+	 */
+	private function buildTableTitle($name, $label) {
+		if (false === $name) {
+			return '';
+		}
+
+		$list = null;
+		if (canvastack_string_contained($label, self::LABEL_TABLE_MARKER)) {
 			$list = null;
-			if (canvastack_string_contained($label, ':setLabelTable')) {
-				$list = null;
-				$label = str_replace(':setLabelTable', '', $label);
-			} else {
-				$list = ' List(s)';
-			}
-			
-			if (empty($label)) {
-				$titleText  = ucwords(str_replace('_', ' ', $name)) . $list;
-			} else {
-				$titleText  = ucwords(str_replace('_', ' ', $label)) . $list;
-			}
-			// SECURITY: Escape title text untuk mencegah XSS
-			$safeTitleText = htmlspecialchars($titleText, ENT_QUOTES, 'UTF-8');
-			$tableTitle = '<div class="panel-heading"><div class="pull-left"><h3 class="panel-title">' . $safeTitleText . '</h3></div><div class="clearfix"></div></div>';
+			$label = str_replace(self::LABEL_TABLE_MARKER, '', $label);
+		} else {
+			$list = self::LIST_SUFFIX;
 		}
-		
-		$baseTableAttributes = ['id' => $tableID, 'class' => $tableClass];
-		$tableAttributes     = $baseTableAttributes;
+
+		if (empty($label)) {
+			$titleText = ucwords(str_replace('_', ' ', $name)) . $list;
+		} else {
+			$titleText = ucwords(str_replace('_', ' ', $label)) . $list;
+		}
+
+		// SECURITY: Escape title text untuk mencegah XSS
+		$safeTitleText = htmlspecialchars($titleText, ENT_QUOTES, 'UTF-8');
+
+		return '<div class="panel-heading"><div class="pull-left"><h3 class="panel-title">'
+			. $safeTitleText
+			. '</h3></div><div class="clearfix"></div></div>';
+	}
+
+	/**
+	 * Build table HTML structure
+	 *
+	 * @param array $data Table data
+	 * @param array $config Table configuration
+	 * @param string $name Table name
+	 * @param array $attributes Table attributes
+	 * @return string Table HTML
+	 */
+	private function buildTableHTML($data, $config, $name, $attributes) {
+		$baseTableAttributes = ['id' => $config['tableID'], 'class' => $config['tableClass']];
+		$tableAttributes = $baseTableAttributes;
+
 		if (!empty($attributes[$name]['attributes']['add_attributes'])) {
-			$tableAttributes = array_merge_recursive($baseTableAttributes, $attributes[$name]['attributes']['add_attributes']);
+			$tableAttributes = array_merge_recursive(
+				$baseTableAttributes,
+				$attributes[$name]['attributes']['add_attributes']
+			);
 		}
-		
+
 		$table  = '<div class="panel-body no-padding">';
 		$table .= '<table' . $this->setAttributes($tableAttributes) . '>';
 		$table .= $this->header($data[$name]);
 		$table .= '</table>';
 		$table .= '</div>';
-		// RENDER DATA TABLE
-		
-		$datatable_columns = $this->body($data[$name]);
+
+		return $table;
+	}
+
+	/**
+	 * Build filter section HTML
+	 *
+	 * @param string $tableID Table ID
+	 * @return string Filter HTML or empty string
+	 */
+	/**
+	 * Build filter section HTML
+	 *
+	 * @param string $tableID Table ID
+	 * @return string Filter HTML or empty string
+	 */
+	/**
+	 * Build filter section HTML
+	 *
+	 * @param string $tableID Table ID
+	 * @return string Filter HTML or empty string
+	 */
+	private function buildFilterSection($tableID) {
+		// PERFORMANCE: Cache filter content to avoid repeated array access
+		$filterContent = $this->filter_contents[$tableID] ?? null;
+
+		if (empty($filterContent['id']) || $tableID !== $filterContent['id']) {
+			return '';
+		}
+
+		// SECURITY: Escape tableID in HTML output (with caching)
+		$safeTableID = $this->getEscapedTableID($tableID);
+
+		$html  = '<span class="canvastack-dt-search-box hide" id="canvastack-'
+			. $safeTableID
+			. '-search-box">'
+			. $this->filterButton($filterContent)
+			. '</span>';
+		$html .= $this->filterModalbox($filterContent);
+
+		return $html;
+	}
+
+	/**
+	 * Wrap table in container HTML
+	 *
+	 * @param string $tableTitle Table title HTML
+	 * @param string $tableHTML Table HTML
+	 * @param string $datatableColumns DataTable columns
+	 * @param string $tableID Table ID
+	 * @return string Complete wrapped HTML
+	 */
+	/**
+	 * Wrap table in container HTML
+	 *
+	 * @param string $tableTitle Table title HTML
+	 * @param string $tableHTML Table HTML
+	 * @param string $datatableColumns DataTable columns
+	 * @param string $tableID Table ID
+	 * @return string Complete wrapped HTML
+	 */
+	private function wrapTableInContainer($tableTitle, $tableHTML, $datatableColumns, $tableID) {
+		// SECURITY: Escape tableID in class name (with caching)
+		$safeTableID = $this->getEscapedTableID($tableID);
+
 		$html  = '<div class="row">';
 		$html .= '<div class="col-md-12">';
 		$html .= '<div class="panel">' . $tableTitle . '<br />';
-		$html .= '<div class="relative canvastack-table-box-' . $tableID . '">';
-		if (!empty($this->filter_contents[$tableID]['id']) && $tableID === $this->filter_contents[$tableID]['id']) {
-			$html .= '<span class="canvastack-dt-search-box hide" id="canvastack-' . $tableID . '-search-box">' . $this->filterButton($this->filter_contents[$tableID]) . '</span>';
-			$html .= $this->filterModalbox($this->filter_contents[$tableID]);
-		}
-		$html .= $table . $datatable_columns;
+		$html .= '<div class="relative canvastack-table-box-' . $safeTableID . '">';
+		$html .= $this->buildFilterSection($tableID);
+		$html .= $tableHTML . $datatableColumns;
 		$html .= '</div>';
 		$html .= '</div>';
 		$html .= '</div>';
 		$html .= '</div>';
-		
+
 		return $html;
 	}
 	
+	protected function setMethod($method) {
+		$this->method = $method;
+	}
+	
+	/**
+	 * Build HTML table with DataTables integration
+	 * 
+	 * Generates complete table HTML including:
+	 * - Table header with column configuration
+	 * - DataTables body with AJAX support
+	 * - Filter integration if configured
+	 * - Action buttons if configured
+	 * 
+	 * @param string $name Table name
+	 * @param array $columns Column configuration
+	 * @param array $attributes Table attributes
+	 * @param string|null $label Custom table label
+	 * @return string Complete table HTML
+	 * @throws \InvalidArgumentException If invalid inputs
+	 */
+	protected function table($name, $columns = [], $attributes = [], $label = null) {
+		try {
+			// SECURITY: Validate all inputs
+			$this->validateTableInputs($name, $columns, $attributes);
+			
+			// Initialize model and data
+			$data = $this->initializeTableModel($name, $attributes);
+			
+			// Extract configuration
+			$config = $this->extractTableConfig($name, $attributes);
+			
+			// Build complete data array
+			$data = $this->buildTableData($name, $columns, $attributes, $data);
+			
+			// Build table components
+			$tableTitle = $this->buildTableTitle($name, $label);
+			$tableHTML = $this->buildTableHTML($data, $config, $name, $attributes);
+			$datatableColumns = $this->body($data[$name]);
+			
+			// Wrap and return
+			return $this->wrapTableInContainer(
+				$tableTitle, 
+				$tableHTML, 
+				$datatableColumns, 
+				$config['tableID']
+			);
+			
+		} catch (\InvalidArgumentException $e) {
+			// SECURITY: Log error and return safe error message
+			error_log('Builder table() validation error: ' . $e->getMessage());
+			return '<div class="alert alert-danger">Error: Invalid table configuration</div>';
+		} catch (\Exception $e) {
+			// SECURITY: Log error and return safe error message
+			error_log('Builder table() error: ' . $e->getMessage());
+			return '<div class="alert alert-danger">Error: Unable to render table</div>';
+		}
+	}
+	
 	private $columnManipulated = [];
+	
+	/**
+	 * Check and manipulate column labels
+	 * 
+	 * @param array $check_labels Labels to check
+	 * @param array $columns Column list
+	 * @return array Processed labels
+	 */
 	private function checkColumnLabel($check_labels, $columns) {
 		$labels = [];
 		foreach ($columns as $icol => $vcol) {
@@ -264,8 +677,8 @@ class Builder {
 		$numbering = $attributes['numbering'] ?? false;
 		$actions = $attributes['actions'] ?? false;
 		
-		if (true === $numbering && !in_array('id', $columns)) {
-			$columns = array_merge(['number_lists'], $columns);
+		if (true === $numbering && !in_array(self::COLUMN_ID, $columns)) {
+			$columns = array_merge([self::COLUMN_NUMBER_LISTS], $columns);
 		}
 		
 		if (!empty($actions)) {
@@ -323,7 +736,8 @@ class Builder {
 	 * @return string HTML for column header
 	 */
 	private function renderStandardColumnHeader($column, $config) {
-		$headerLabel = htmlspecialchars(ucwords(str_replace('_', ' ', $column)), ENT_QUOTES, 'UTF-8');
+		// PERFORMANCE: Use cached column label
+		$headerLabel = $this->getColumnLabel($column);
 		$columnLower = strtolower($column);
 		
 		// Build column ID
@@ -336,13 +750,13 @@ class Builder {
 		}
 		
 		// Special columns
-		if (in_array($columnLower, ['no', 'id', 'nik'])) {
-			return "<th width=\"50\"{$config['headerColor']}>{$headerLabel}</th>";
+		if (in_array($columnLower, [self::COLUMN_NO, self::COLUMN_ID, self::COLUMN_NIK])) {
+			return "<th width=\"" . self::COLUMN_WIDTH_MEDIUM . "\"{$config['headerColor']}>{$headerLabel}</th>";
 		}
 		
-		if ('number_lists' === $columnLower) {
-			return '<th width="30"' . $config['headerColor'] . '>No</th>' .
-			       '<th width="30"' . $config['headerColor'] . '>ID</th>';
+		if (self::COLUMN_NUMBER_LISTS === $columnLower) {
+			return '<th width="' . self::COLUMN_WIDTH_SMALL . '"' . $config['headerColor'] . '>No</th>' .
+			       '<th width="' . self::COLUMN_WIDTH_SMALL . '"' . $config['headerColor'] . '>ID</th>';
 		}
 		
 		// Standard column
@@ -371,7 +785,7 @@ class Builder {
 			$classAttributes .= $config['alignColumn']['header'][$column];
 		}
 		
-		if ('action' === strtolower($column)) {
+		if (self::COLUMN_ACTION === strtolower($column)) {
 			$classAttributes .= ' canvastack-column-action';
 		}
 		
@@ -393,7 +807,11 @@ class Builder {
 		$columnLower = strtolower($column);
 		
 		if (!empty($widthColumn[$columnLower])) {
-			return ' width="' . $widthColumn[$columnLower] . '"';
+			// SECURITY: Validate width value
+			$validatedWidth = $this->validateWidth($widthColumn[$columnLower]);
+			if ($validatedWidth !== null) {
+				return ' width="' . $validatedWidth . '"';
+			}
 		}
 		
 		return '';
@@ -456,7 +874,7 @@ class Builder {
 	 */
 	private function buildMergedTableRow(&$columns, $mergeColumn, $dataColumns, $columnColor, $headerColor, $attributes) {
 		$mergedTable = '<tr>';
-		$setMergeText = '::merge::';
+		$setMergeText = self::MERGE_TEXT_SEPARATOR;
 		
 		foreach ($columns as $index => $column) {
 			$matchedMerge = $this->findMatchingMergeColumn($column, $mergeColumn);
@@ -511,7 +929,8 @@ class Builder {
 	 * @return string HTML for column header
 	 */
 	private function renderMergedColumnHeader($column, $mergeData, $dataColumns, $columnColor, $headerColor, $attributes) {
-		$headerLabel = htmlspecialchars(ucwords(str_replace('_', ' ', $column)), ENT_QUOTES, 'UTF-8');
+		// PERFORMANCE: Use cached column label
+		$headerLabel = $this->getColumnLabel($column);
 		$id = $this->buildColumnId($column, $dataColumns);
 		$columnClass = $this->buildMergedColumnClass($column, $attributes);
 		$colorStyle = $this->getColumnColorStyle($column, $columnColor);
@@ -573,7 +992,7 @@ class Builder {
 		ksort($columns);
 		
 		$headerTable = '<tr>';
-		$setMergeText = '::merge::';
+		$setMergeText = self::MERGE_TEXT_SEPARATOR;
 		
 		foreach ($columns as $index => $column) {
 			if (str_contains($column, $setMergeText)) {
@@ -594,10 +1013,11 @@ class Builder {
 	 * @return string HTML for merge label
 	 */
 	private function renderMergeLabel($column, $headerColor) {
-		$setMergeText = '::merge::';
+		$setMergeText = self::MERGE_TEXT_SEPARATOR;
 		$merge_label = explode($setMergeText, $column);
 		$colspan = intval($merge_label[1]);
-		$headerLabel = htmlspecialchars(ucwords(str_replace('_', ' ', $merge_label[0])), ENT_QUOTES, 'UTF-8');
+		// PERFORMANCE: Use cached column label
+		$headerLabel = $this->getColumnLabel($merge_label[0]);
 		
 		return "<th class=\"merge-column\" colspan=\"{$colspan}\"{$headerColor}>{$headerLabel}</th>";
 	}
@@ -613,19 +1033,20 @@ class Builder {
 	 * @return string HTML for rowspan column
 	 */
 	private function renderRowspanColumn($column, $dataColumns, $columnColor, $headerColor, $attributes) {
-		$headerLabel = htmlspecialchars(ucwords(str_replace('_', ' ', $column)), ENT_QUOTES, 'UTF-8');
+		// PERFORMANCE: Use cached column label
+		$headerLabel = $this->getColumnLabel($column);
 		$id = $this->buildColumnId($column, $dataColumns);
 		
 		$columnLower = strtolower($column);
 		
 		// Special columns: no, id, nik
-		if (in_array($columnLower, ['no', 'id', 'nik'])) {
-			return "<th rowspan=\"2\" width=\"50\"{$headerColor}>{$headerLabel}</th>";
+		if (in_array($columnLower, [self::COLUMN_NO, self::COLUMN_ID, self::COLUMN_NIK])) {
+			return "<th rowspan=\"2\" width=\"" . self::COLUMN_WIDTH_MEDIUM . "\"{$headerColor}>{$headerLabel}</th>";
 		}
 		
 		// Special column: number_lists
-		if ('number_lists' === $columnLower) {
-			return "<th rowspan=\"2\" width=\"30\"{$headerColor}>No</th><th rowspan=\"2\" width=\"30\"{$headerColor}>ID</th>";
+		if (self::COLUMN_NUMBER_LISTS === $columnLower) {
+			return "<th rowspan=\"2\" width=\"" . self::COLUMN_WIDTH_SMALL . "\"{$headerColor}>No</th><th rowspan=\"2\" width=\"" . self::COLUMN_WIDTH_SMALL . "\"{$headerColor}>ID</th>";
 		}
 		
 		// Standard columns
@@ -665,7 +1086,7 @@ class Builder {
 			$classAttributes .= $attributes['attributes']['column']['class'][$column];
 		}
 		
-		if ('action' === strtolower($column)) {
+		if (self::COLUMN_ACTION === strtolower($column)) {
 			$classAttributes .= ' canvastack-column-action';
 		}
 		
@@ -687,12 +1108,24 @@ class Builder {
 		$columnLower = strtolower($column);
 		
 		if (!empty($attributes['attributes']['column_width'][$columnLower])) {
-			return ' width="' . $attributes['attributes']['column_width'][$columnLower] . '"';
+			// SECURITY: Validate width value
+			$validatedWidth = $this->validateWidth($attributes['attributes']['column_width'][$columnLower]);
+			if ($validatedWidth !== null) {
+				return ' width="' . $validatedWidth . '"';
+			}
 		}
 		
 		return '';
 	}
 	
+	/**
+	 * Set column elements (sortable, searchable, clickable)
+	 * 
+	 * @param string $name Element name (sortable, searchable, clickable)
+	 * @param array $column_data Column data configuration
+	 * @param array $columns Column list
+	 * @return array Element configuration
+	 */
 	private function setColumnElements($name, $column_data, $columns) {
 		$element = [];
 		if (!empty($column_data[$name])) {
@@ -714,6 +1147,13 @@ class Builder {
 		return $element;
 	}
 	
+	/**
+	 * Set formula columns
+	 * 
+	 * @param array $columns Column list
+	 * @param array $data Formula data
+	 * @return array Modified columns with formula
+	 */
 	private function setFormulaColumns($columns, $data) {
 		return canvastack_set_formula_columns($columns, $data['attributes']['conditions']['formula']);
 	}
@@ -778,7 +1218,7 @@ class Builder {
 		$columns = $config['columnData']['lists'];
 		
 		if (true === $config['numbering']) {
-			$columns = array_merge(['number_lists'], $columns);
+			$columns = array_merge([self::COLUMN_NUMBER_LISTS], $columns);
 		}
 		
 		if (!empty($config['actions'])) {
@@ -924,7 +1364,7 @@ class Builder {
 		}
 		
 		// Handle special column types
-		if ('number_lists' === $column) {
+		if (self::COLUMN_NUMBER_LISTS === $column) {
 			return $this->buildNumberListsColumn($column_id);
 		}
 		
@@ -1025,7 +1465,7 @@ class Builder {
 	private function buildDataTableInfo($data, $dt_columns, $config) {
 		$new_data_columns = [];
 		foreach ($dt_columns as $dtcols) {
-			$new_data_columns[] = ($dtcols['name'] === 'DT_RowIndex') ? 'number_lists' : $dtcols['name'];
+			$new_data_columns[] = ($dtcols['name'] === 'DT_RowIndex') ? self::COLUMN_NUMBER_LISTS : $dtcols['name'];
 		}
 		
 		$dt_info = [
@@ -1227,15 +1667,24 @@ class Builder {
 		if (!empty($attributes)) {
 			$tableDataColor = [];
 			foreach ($attributes as $colorCode => $dataColor) {
-				if (!empty($dataColor['text'])) $textColor = " color:{$dataColor['text']};";
+				// SECURITY: Validate color code
+				$safeColorCode = $this->validateColor($colorCode);
+				
+				$textColor = '';
+				if (!empty($dataColor['text'])) {
+					// SECURITY: Validate text color
+					$safeTextColor = $this->validateColor($dataColor['text']);
+					$textColor = " color:{$safeTextColor};";
+				}
+				
 				if (!empty($dataColor['columns'])) {
 					foreach ($dataColor['columns'] as $columnName) {
-						$tableDataColor['columns'][$columnName] = $this->setAttributes(['style' => "background-color:{$colorCode} !important;{$textColor}"]);
+						$tableDataColor['columns'][$columnName] = $this->setAttributes(['style' => "background-color:{$safeColorCode} !important;{$textColor}"]);
 					}
 				}
 				
 				if (empty($dataColor['columns'])) {
-					if (true === $dataColor['header']) $tableDataColor['header'] = $this->setAttributes(['style' => "background-color:{$colorCode} !important;{$textColor}"]);
+					if (true === $dataColor['header']) $tableDataColor['header'] = $this->setAttributes(['style' => "background-color:{$safeColorCode} !important;{$textColor}"]);
 				}
 			}
 			

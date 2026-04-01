@@ -76,6 +76,11 @@ return [
 		'type'            => 'X-UA-Compatible',
 		'content'         => 'IE=edge,chrome=1'
 	],
+
+	// Table Config
+	'canvalib_table'      => [
+		'method'          => 'POST'
+	],
 	
 	'user' => [
 		'alias_label'     => null

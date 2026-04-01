@@ -2,6 +2,7 @@
 namespace Canvastack\Origin\Controllers\Admin\System\Includes;
 
 use Canvastack\Origin\Models\Admin\System\MappingPage as MappingData;
+use Canvastack\Origin\Library\Constants\SafeHtml;
 
 /**
  * Created on Sep 6, 2022
@@ -154,20 +155,24 @@ trait MappingPage {
 		$this->get_data_map();
 		
 		$row_table = [];
-		$icon      = '<i class="fa fa-caret-right"></i> &nbsp; ';
+		$icon      = SafeHtml::mark('<i class="fa fa-caret-right"></i> &nbsp; ');
 		$roleData  = null;
 		
 		foreach ($this->menu_privileges as $parent => $childs) {
 			$parent_title	= ucwords(str_replace('_', ' ', $parent));
 			if (!empty($childs->name)) $parent_title = $childs->name;
-			$row_table[]	= [canvastack_table_row_attr($icon . "{$parent_title}", ['style' => 'font-weight:500;text-indent:5pt;color:black', 'colspan' => 5])];
+			// Unmark icon, concatenate, then mark as safe HTML
+			$parentContent = SafeHtml::unmark($icon) . "{$parent_title}";
+			$row_table[]	= [canvastack_table_row_attr(SafeHtml::mark($parentContent), ['style' => 'font-weight:500;text-indent:5pt;color:black', 'colspan' => 5])];
 			
 			foreach ($childs as $child_name => $data_module) {
 				if (!isset($data_module->id)) {
 					$child_title	= ucwords(str_replace('_', ' ', $child_name));
 					if (!empty($data_module->name)) $child_title = $data_module->name;
 					
-					$row_table[]	= [canvastack_table_row_attr($icon . $child_title, ['style' => 'font-weight:500;text-indent:12pt;color:green', 'colspan' => 5])];
+					// Unmark icon, concatenate, then mark as safe HTML
+					$childContent = SafeHtml::unmark($icon) . $child_title;
+					$row_table[]	= [canvastack_table_row_attr(SafeHtml::mark($childContent), ['style' => 'font-weight:500;text-indent:12pt;color:green', 'colspan' => 5])];
 					foreach ($data_module as $module_name => $module_data) {
 						if (!empty($this->model_class_info[$module_data->route])) {
 							$roleData = $this->model_class_info[$module_data->route];
@@ -181,7 +186,9 @@ trait MappingPage {
 							$module_title = ucwords(str_replace('_', ' ', $module_name));
 							if (!empty($module_data->name)) $module_title = $module_data->name;
 							 
-							$row_table[] = [canvastack_table_row_attr($icon . $module_title, ['style' => 'font-weight:500;text-indent:19pt', 'colspan' => 4])];
+							// Unmark icon, concatenate, then mark as safe HTML
+							$moduleContent = SafeHtml::unmark($icon) . $module_title;
+							$row_table[] = [canvastack_table_row_attr(SafeHtml::mark($moduleContent), ['style' => 'font-weight:500;text-indent:19pt', 'colspan' => 4])];
 							foreach ($module_data as $third_name => $third_data) {
 							if (!empty($this->model_class_info[$third_data->route])) {
 								$roleData = $this->model_class_info[$third_data->route];
@@ -311,7 +318,7 @@ trait MappingPage {
 			$roleColumns['identifier']      = canvastack_input('hidden', "qmod-{$identifier}", $nodeModel, null, $module_data->id);
 			$tableID                        = $this->setID($identifier);
 			$tableLabel                     = ucwords(str_replace('_', ' ', str_replace('view_', ' ', str_replace('t_', ' ', $roleData['model']['table_map']))));
-			$roleColumns['table_name']      = canvastack_form_checkList($roleAttributes['table_name'], $roleValues['table_map'], $tableLabel, $roleValues['table_checked'], 'success read-select full-width text-left', $tableID, "class='{$tableID}{$this->nodeID}{$nodeModel}'");
+			$roleColumns['table_name']      = canvastack_form_checkList($roleAttributes['table_name'], $roleValues['table_map'], $tableLabel, $roleValues['table_checked'], 'success read-select full-width text-left', $tableID, "class=\"{$tableID}{$this->nodeID}{$nodeModel}\"");
 			
 			$fieldID   = $this->setID($identifier);
 			$valueID   = $this->setID($identifier);
@@ -374,7 +381,9 @@ trait MappingPage {
 			$mergeBox          = canvastack_draw_query_map_page_table($routeToAttribute, $fieldID, $valueID, $roleColumns, $buffers, $fieldbuff);
 			
 			$resultBox         = [];
-			$resultBox['head'] = [canvastack_table_row_attr($icon . $module_name_label . $roleColumns['identifier'], ['style' => 'text-indent:19pt', 'id' => strtolower($module_name) . '-row'])];
+			// Concatenate all parts then mark as safe HTML
+			$headContent       = SafeHtml::unmark($icon) . $module_name_label . SafeHtml::unmark($roleColumns['identifier']);
+			$resultBox['head'] = [canvastack_table_row_attr(SafeHtml::mark($headContent), ['style' => 'text-indent:19pt', 'id' => strtolower($module_name) . '-row'])];
 			$resultBox['body'] = [
 				canvastack_table_row_attr($roleColumns['table_name'] , ['align' => 'left', 'id' => strtolower($module_name) . '-row']),
 				canvastack_table_row_attr($mergeBox , $opt),

@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Session;
 use Canvastack\Origin\Models\Admin\System\Modules;
 use Canvastack\Origin\Models\Admin\System\Preference;
 use Canvastack\Origin\Library\Components\MetaTags;
+use Canvastack\Origin\Library\Constants\SafeHtml;
 use Canvastack\Origin\Controllers\Admin\System\GroupController;
 use Canvastack\Origin\Controllers\Admin\System\AjaxController;
 use Canvastack\Origin\Models\Admin\System\Log;
@@ -959,6 +960,21 @@ if (!function_exists('canvastack_insert')) {
 		foreach ($request->all() as $key => $value) {
 			// manipulate value requested by checkbox and/or multiple selectbox
 			if (is_array($value)) {
+				// ✅ FIXED: Check if nested array before implode
+				// Nested arrays (like DataTables POST params) should be skipped
+				$isNested = false;
+				foreach ($value as $v) {
+					if (is_array($v)) {
+						$isNested = true;
+						break;
+					}
+				}
+				
+				if ($isNested) {
+					// Skip nested arrays - they're not form data
+					continue;
+				}
+				
 				$value = implode(',', $value);
 			}
 			
@@ -1586,31 +1602,72 @@ if (!function_exists('canvastack_mappage_button_add')) {
 	 * 
 	 * @return string
 	 */
+	/**
+	 * Generate button add/reset for mapping page with JavaScript
+	 * 
+	 * @param string $ajax_url AJAX URL for data loading
+	 * @param string $node_btn Button node ID
+	 * @param string $id Checkbox ID
+	 * @param string $target_id Field name select ID
+	 * @param string $second_target Field value select ID
+	 * 
+	 * @return string Safe HTML (marked as safe)
+	 */
 	function canvastack_mappage_button_add($ajax_url, $node_btn, $id, $target_id, $second_target) {
-		$o  = "<div id='{$node_btn}' class='action-buttons-box'>";
+		// Escape for JavaScript context
+		$node_btn_safe = canvastack_escape_js($node_btn);
+		$id_safe = canvastack_escape_js($id);
+		$target_id_safe = canvastack_escape_js($target_id);
+		$second_target_safe = canvastack_escape_js($second_target);
+		$ajax_url_safe = canvastack_escape_js($ajax_url);
+		
+		$o  = "<div id='{$node_btn}' class='action-buttons-box' style='display: none;'>";
 			$o .= "<div class='hidden-sm hidden-xs action-buttons'>";
 				$o .= "<a id='plusn{$node_btn}' class='btn btn-success btn-xs btn_view'><i class='fa fa-plus-circle' aria-hidden='true'></i></a>";
-			//	$o .= "<a id='plusr{$node_btn}' class='btn teal btn-xs btn_view color-white' style=\"color: white !important;\"><i class='fa fa-plus' aria-hidden='true'></i></a>";
-				$o .= "<a id='reset{$node_btn}' class='btn btn-danger btn-xs btn_view'><i class='fa fa-recycle' aria-hidden='true'></i></a>";
+				$o .= "<a id='reset{$node_btn}' class='btn btn-danger btn-xs btn_view' style='display: none;'><i class='fa fa-recycle' aria-hidden='true'></i></a>";
 			$o .= "</div>";
 		$o .= "</div>";
 		
 		$o .= "<div id=\"qc_{$id}\" class=\"qc_{$id}\" style=\"display:none;\"></div>";
-		$o .= "<script type='text/javascript'>$(document).ready(function() {mappingPageButtonManipulation('{$node_btn}', '{$id}', '{$target_id}', '{$second_target}', '{$ajax_url}');});</script>";
+		$o .= "<script type='text/javascript'>$(document).ready(function() {mappingPageButtonManipulation('{$node_btn_safe}', '{$id_safe}', '{$target_id_safe}', '{$second_target_safe}', '{$ajax_url_safe}');});</script>";
 		
-		return $o;
+		// Mark as safe HTML to prevent double-encoding
+		return SafeHtml::mark($o);
 	}
 }
 
 if (!function_exists('canvastack_input')) {
 	
+	/**
+	 * Generate HTML input element
+	 * 
+	 * Simple helper to generate input elements with common attributes.
+	 * 
+	 * @param string $type Input type (text, hidden, checkbox, etc)
+	 * @param string|null $id Input ID attribute
+	 * @param string|null $class Input class attribute
+	 * @param string|null $name Input name attribute
+	 * @param string|null $value Input value attribute
+	 * 
+	 * @return string Safe HTML input element (marked as safe)
+	 */
 	function canvastack_input($type, $id = null, $class = null, $name = null, $value = null) {
-		$id    = " id=\"{$id}\"";
-		$class = " class=\"{$class}\"";
-		$value = " value=\"{$value}\"";
-		$name  = " name=\"{$name}\"";
+		// Escape all attributes for security
+		$type_safe  = htmlspecialchars($type, ENT_QUOTES, 'UTF-8');
+		$id_safe    = htmlspecialchars($id, ENT_QUOTES, 'UTF-8');
+		$class_safe = htmlspecialchars($class, ENT_QUOTES, 'UTF-8');
+		$name_safe  = htmlspecialchars($name, ENT_QUOTES, 'UTF-8');
+		$value_safe = htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
 		
-		return "<input type=\"{$type}\"{$id}{$class}{$value}{$name} />";
+		$id_attr    = " id=\"{$id_safe}\"";
+		$class_attr = " class=\"{$class_safe}\"";
+		$value_attr = " value=\"{$value_safe}\"";
+		$name_attr  = " name=\"{$name_safe}\"";
+		
+		$html = "<input type=\"{$type_safe}\"{$id_attr}{$class_attr}{$value_attr}{$name_attr} />";
+		
+		// Mark as safe HTML to prevent double-encoding
+		return SafeHtml::mark($html);
 	}
 }
 

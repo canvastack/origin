@@ -38,7 +38,8 @@ class LogController extends Controller {
 		$this->setPage();
 		$this->removeActionButtons(['add']);
 		
-	//	$this->table->method('POST');
+		// ✅ No need to set method manually - uses default from config
+		// $this->table->method('POST');
 		$this->table->searchable(['user_fullname', 'user_group_info', 'method', 'module_name']);
 		$this->table->clickable(false);
 		$this->table->sortable();

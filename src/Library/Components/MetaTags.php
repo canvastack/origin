@@ -25,15 +25,29 @@ class MetaTags {
 	public function __construct() {
 		if (!empty(route('system.config.preference.index'))) {
 			$preference = new Preference();
-			$prefData   = $preference->first()->getAttributes();
+			$prefRecord = $preference->first();
 			
-			$this->preference['app_name']         = $prefData['title'];
-			$this->preference['meta_title']       = $prefData['meta_title'];
-			$this->preference['meta_keywords']    = $prefData['meta_keywords'];
-			$this->preference['meta_description'] = $prefData['meta_description'];
-			$this->preference['meta_author']      = $prefData['meta_author'];
-			$this->preference['email_person']     = $prefData['email_person'];
-			$this->preference['email_address']    = $prefData['email_address'];
+			// Check if preference record exists before accessing attributes
+			if (!is_null($prefRecord)) {
+				$prefData = $prefRecord->getAttributes();
+				
+				$this->preference['app_name']         = $prefData['title'];
+				$this->preference['meta_title']       = $prefData['meta_title'];
+				$this->preference['meta_keywords']    = $prefData['meta_keywords'];
+				$this->preference['meta_description'] = $prefData['meta_description'];
+				$this->preference['meta_author']      = $prefData['meta_author'];
+				$this->preference['email_person']     = $prefData['email_person'];
+				$this->preference['email_address']    = $prefData['email_address'];
+			} else {
+				// Set default values when no preference record exists
+				$this->preference['app_name']         = config('app.name', 'Application');
+				$this->preference['meta_title']       = config('app.name', 'Application');
+				$this->preference['meta_keywords']    = '';
+				$this->preference['meta_description'] = '';
+				$this->preference['meta_author']      = '';
+				$this->preference['email_person']     = '';
+				$this->preference['email_address']    = '';
+			}
 		}
 		
 		$this->load_meta();

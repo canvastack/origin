@@ -126,3 +126,47 @@ nav>.main-menu>li>ul, nav>.main-menu>li>ul.colapse.in {
 	border-bottom: 1px solid rgba(240, 50, 50, 0.38) !important;
 	text-shadow: rgba(217, 41, 115, 0.35) -1px -1px 0px;
 }
+
+.file-requirements-info {
+	margin-top: 12px;
+	padding: 12px 16px;
+	background: linear-gradient(135deg, #fff 0%, #fff 100%);
+	border-radius: 8px;
+	box-shadow: 0 2px 8px rgba(102, 126, 234, 0.15);
+	border-left: 4px solid rgba(189, 205, 190, 0.69);
+}
+
+.file-requirements-info > div.box {
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+}
+
+.file-requirements-info > div.box > div.icon {
+	flex-shrink: 0;
+	margin-top: 2px;
+}
+.file-requirements-info > div.box > div.content-box {
+	background: transparent;
+	border: none;
+	flex: 1;
+	color: rgb(27, 27, 27);
+}
+.file-requirements-info > div.box > div.content-box > div.title {
+	font-weight: 600;
+	font-size: 13px;
+	margin-bottom: 6px;
+	letter-spacing: 0.3px;
+}
+.file-requirements-info > div.box > div.content-box > div.content {
+	font-size: 12px;
+	line-height: 1.6;
+	opacity: 0.95;
+	margin-bottom: 4px;
+}
+.file-requirements-info > div.box > div.content-box > div.content > .span.label {
+	opacity: 0.8;
+}
+.file-requirements-info > div.box > div.content-box > div.content > .span.text {
+	font-weight: 500;
+}

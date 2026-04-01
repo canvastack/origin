@@ -1,14 +1,7 @@
-// ============================================================================
-// CONSTANTS - Date/Time Placeholder Values
-// ============================================================================
 // These placeholder values are used by date/time pickers and should be filtered out
+const PLACEHOLDER_DATE = '____-__-__';
 const PLACEHOLDER_DATETIME = '____-__-__ __:__:__';
 const PLACEHOLDER_DATETIME_ENCODED = '____-__-__%20__%3A__%3A__';
-const PLACEHOLDER_DATE = '____-__-__';
-
-// ============================================================================
-// AJAX FUNCTIONS
-// ============================================================================
 
 function ajaxSelectionProcess(object, id, target_id, url, data = [], method = 'POST', onError = 'Error') {
 	var dataInfo = JSON.parse(data);
@@ -119,7 +112,7 @@ function exportFromModal(modalID, exportID, filterID, token, url, link, filter =
 }
 
 function canvastackDataTableFilters(id, url, obTable) {
-	$('#canvastack-' + id + '-search-box').appendTo('.cody_' + id + '_canvastack-dt-filter-box');
+	$('#canvastack-' + id + '-search-box').appendTo('.CanvaStack_' + id + '_canvastack-dt-filter-box');
 	$('.canvastack-dt-search-box').removeClass('hide');
 	$('#' + id + '_CanvaStackProcessing').hide();
 	
@@ -127,7 +120,7 @@ function canvastackDataTableFilters(id, url, obTable) {
 		event.preventDefault();
 		$('#' + id + '_CanvaStackProcessing').show();
 		
-		// FIX: Use serializeArray() instead of manual parsing
+		// Use serializeArray() instead of manual parsing
 		// This properly handles values with '=' character
 		var input = {};
 		$.each($(this).serializeArray(), function(i, field) {
@@ -135,8 +128,10 @@ function canvastackDataTableFilters(id, url, obTable) {
 		});
 		
 		var filterURI = [];
+		var filterData = {};
+		
 		$.each(input, function(index, value) {
-			// FIX: Use constants instead of magic strings
+			// Use constants instead of magic strings
 			if (
 				index != 'renderDataTables' &&
 				index != 'difta' &&
@@ -150,18 +145,52 @@ function canvastackDataTableFilters(id, url, obTable) {
 			) {
 				if ('string' === typeof(value)) {
 					filterURI.push(index + '=' + encodeURIComponent(value));
+					filterData[index] = value;  // Store for POST data
 				} else if ('object' === typeof(value)) {
 					$.each(value, function(idx, _val) {
 						filterURI.push(index + '[' + idx + ']' + '=' + encodeURIComponent(_val));
+						if (!filterData[index]) filterData[index] = {};
+						filterData[index][idx] = _val;  // Store for POST data
 					});
 				}
 			}
 		});
 		
-		obTable.ajax.url(url + '&' + filterURI.join('&') + '&filters=true').load(function() {
-			$('#' + id + '_CanvaStackProcessing').hide();
-			$('#' + id + '_CanvaStackFILTER').modal('hide');
-		});
+		// Check if using POST method
+		var ajaxSettings = obTable.settings()[0].ajax;
+		var isPostMethod = false;
+		
+		if (typeof ajaxSettings === 'object' && ajaxSettings.type === 'POST') {
+			isPostMethod = true;
+		}
+		
+		if (isPostMethod) {
+			// POST method: Send filters via POST body
+			// Store original data function
+			var originalDataFn = ajaxSettings.data;
+			
+			// Create new data function that includes filters
+			ajaxSettings.data = function(d) {
+				// Call original data function if exists
+				if (typeof originalDataFn === 'function') {
+					d = originalDataFn(d) || d;
+				}
+				// Merge filter data into POST body
+				return $.extend({}, d, filterData);
+			};
+			
+			// Update URL to include filters=true flag and reload
+			obTable.ajax.url(url + '&filters=true').load(function() {
+				$('#' + id + '_CanvaStackProcessing').hide();
+				$('#' + id + '_CanvaStackFILTER').modal('hide');
+			});
+		} else {
+			// GET method: Send filters via URL (original behavior)
+			obTable.ajax.url(url + '&' + filterURI.join('&') + '&filters=true').load(function() {
+				$('#' + id + '_CanvaStackProcessing').hide();
+				$('#' + id + '_CanvaStackFILTER').modal('hide');
+			});
+		}
 	});
 }
 

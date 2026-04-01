@@ -255,16 +255,18 @@ if (!function_exists('canvastack_sidebar_content')) {
 			$o .= "</div>";
 		} else {
 			$sessions = canvastack_sessions();
+			$userId = $sessions['id'] ?? 0; // Get user ID with fallback to 0
+			
 			$o  = "<div class=\"relative\">";
 			$o .= "<a data-toggle=\"collapse\" href=\"#userInfoBox\" role=\"button\" aria-expanded=\"false\" aria-controls=\"userInfoBox\" class=\"btn-sets btn-sets-sm absolute sets-right-bottom sets-top btn-primary shadow1 collapsed\"><i class=\"ti-settings\"></i></a>";
 			$o .= "<div class=\"user-panel light\">";
 			$o .= "{$media_title}";
 			$o .= "<div class=\"multi-collapse collapse\" id=\"userInfoBox\">";
 			$o .= "<div class=\"list-group mt-3 shadow\">";
-			$o .= "<a href=\"{$base_url}/system/accounts/user/{$sessions['id']}\" class=\"list-group-item list-group-item-action \">";
+			$o .= "<a href=\"{$base_url}/system/accounts/user/{$userId}\" class=\"list-group-item list-group-item-action \">";
 			$o .= "<i class=\"mr-2 ti-user text-blue\"></i>Profile";
 			$o .= "</a>";
-			$o .= "<a href=\"{$base_url}/system/accounts/user/{$sessions['id']}/edit\" class=\"list-group-item list-group-item-action\"><i class=\"mr-2 ti-settings text-yellow\"></i>Edit</a>";
+			$o .= "<a href=\"{$base_url}/system/accounts/user/{$userId}/edit\" class=\"list-group-item list-group-item-action\"><i class=\"mr-2 ti-settings text-yellow\"></i>Edit</a>";
 			$o .= "<a href=\"{$base_url}/logout\" class=\"list-group-item list-group-item-action\"><i class=\"mr-2 ti-panel text-purple\"></i>Log Out</a>";
 			$o .= "</div>";
 			$o .= "</div>";

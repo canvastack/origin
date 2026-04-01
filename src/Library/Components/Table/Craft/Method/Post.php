@@ -85,7 +85,7 @@ class Post {
 		$script  = '<script type="text/javascript">';
 		$script .= "
 jQuery(function($) {
-	var cody_{$varTableID}_dt = $('#{$this->id}').DataTable(
+	var CanvaStack_{$varTableID}_dt = $('#{$this->id}').DataTable(
 		{$configurations}
 	);
 });

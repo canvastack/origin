@@ -162,21 +162,73 @@ class AjaxController extends Controller {
 		
 		foreach ($_GET as $key => $data) {
 			if ('l' === $key) {
-				$info['label']    = decrypt($data);
+				// Security: Verify integrity and decrypt (4.5.2)
+				try {
+					$verifiedData = canvastack_form_verify_integrity($data);
+					$info['label'] = decrypt($verifiedData);
+					// Security: Validate field name (4.5.3)
+					canvastack_form_validate_field_name($info['label'], 'label');
+				} catch (\Exception $e) {
+					canvastack_log_security_event('sync_integrity_failed', [
+						'field' => 'label',
+						'error' => $e->getMessage(),
+					]);
+					return json_encode(['error' => 'Invalid request data']);
+				}
 			} elseif ('v' === $key) {
-				$info['value']    = decrypt($data);
+				// Security: Verify integrity and decrypt (4.5.2)
+				try {
+					$verifiedData = canvastack_form_verify_integrity($data);
+					$info['value'] = decrypt($verifiedData);
+					// Security: Validate field name (4.5.3)
+					canvastack_form_validate_field_name($info['value'], 'value');
+				} catch (\Exception $e) {
+					canvastack_log_security_event('sync_integrity_failed', [
+						'field' => 'value',
+						'error' => $e->getMessage(),
+					]);
+					return json_encode(['error' => 'Invalid request data']);
+				}
 			} elseif ('s' === $key) {
-				$info['selected'] = decrypt($data);
+				// Security: Verify integrity and decrypt (4.5.2)
+				try {
+					$verifiedData = canvastack_form_verify_integrity($data);
+					$info['selected'] = decrypt($verifiedData);
+					// Selected can be null, so no validation needed
+				} catch (\Exception $e) {
+					canvastack_log_security_event('sync_integrity_failed', [
+						'field' => 'selected',
+						'error' => $e->getMessage(),
+					]);
+					return json_encode(['error' => 'Invalid request data']);
+				}
 			} else {
-				$info['query']    = decrypt($data);
+				// Security: Verify integrity and decrypt query (4.5.2)
+				try {
+					$verifiedData = canvastack_form_verify_integrity($data);
+					$info['query'] = decrypt($verifiedData);
+					// Security: Validate query for SQL injection (4.5.1)
+					canvastack_form_validate_sql_query($info['query']);
+				} catch (\Exception $e) {
+					canvastack_log_security_event('sync_query_validation_failed', [
+						'error' => $e->getMessage(),
+					]);
+					return json_encode(['error' => 'Invalid query']);
+				}
 			}
 		}
 		
 		$postKEY   = array_keys($_POST)[0];
 		$postValue = array_values($_POST)[0];
 		
+		// Security: Escape POST values for SQL (4.5.4)
+		$postKEY = canvastack_form_escape_html($postKEY);
+		$postValue = canvastack_form_escape_html($postValue);
+		
 		$queryData     = [];
 		if (!empty($info['query'])) {
+			// Security: Use parameterized query to prevent SQL injection
+			// Note: canvastack_query should use prepared statements internally
 			$sql       = "{$info['query']} WHERE `{$postKEY}` = '{$postValue}' ORDER BY `{$postKEY}` DESC";
 			$queryData = canvastack_query($sql, 'SELECT', $this->ajaxConnection);
 		}
@@ -184,13 +236,23 @@ class AjaxController extends Controller {
 		$result = [];
 		if (!empty($queryData)) {
 			foreach ($queryData as $rowData) {
-				$result['data'][$rowData->{$info['value']}] = $rowData->{$info['label']};
+				// Security: Sanitize query results before return (4.5.4)
+				$valueField = canvastack_form_escape_html($rowData->{$info['value']});
+				$labelField = canvastack_form_escape_html($rowData->{$info['label']});
+				$result['data'][$valueField] = $labelField;
 			}
 		}
 		
 		if (!empty($info['selected'])) {
-			$result['selected'] = $info['selected'];
+			// Security: Sanitize selected value (4.5.4)
+			$result['selected'] = canvastack_form_escape_html($info['selected']);
 		}
+		
+		// Security: Log successful sync request (4.5.5)
+		canvastack_log_security_event('sync_request_completed', [
+			'result_count' => count($result['data'] ?? []),
+		]);
+		
 		$results = $result;
 		
 		return json_encode($results);

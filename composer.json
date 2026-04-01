@@ -1,13 +1,21 @@
 {
-	"name" : "canvastack/origin",
-  	"version": "1.1.0",
-	"type" : "library",
-	"description" : "Laravel Library Code from DIY",
-	"keywords" : [
+	"name": "canvastack/origin",
+	"type": "library",
+	"description": "Comprehensive Laravel library for building secure, accessible, and maintainable web applications — featuring Form Builder, DataTables, Charts, and more.",
+	"keywords": [
 		"canvastack",
-		"library"
+		"laravel",
+		"form-builder",
+		"datatables",
+		"charts",
+		"security",
+		"accessibility",
+		"wcag",
+		"xss-protection",
+		"file-upload"
 	],
-	"license" : "MIT",
+	"homepage": "https://github.com/canvastack/origin",
+	"license": "MIT",
 	"require" : {
 		"laravel/ui" : "~4.0",
 		"laravelcollective/html" : "~6.4",
@@ -16,11 +24,20 @@
 		"yajra/laravel-datatables" : "~9.0",
 		"jlawrence/eos" : "~3.2"
 	},
-	"authors" : [{
-			"name" : "wisnuwidi",
-			"email" : "wisnuwidi@gmail.com"
-		}
-	],
+    "require-dev": {
+        "giorgiosironi/eris": "^1.1"
+    },
+	"authors": [{
+		"name": "Wisnu Widi",
+		"email": "wisnuwidi@gmail.com",
+		"role": "Developer"
+	}],
+	"support": {
+		"issues": "https://github.com/canvastack/origin/issues",
+		"source": "https://github.com/canvastack/origin",
+		"docs": "https://github.com/canvastack/origin/tree/main/docs",
+		"security": "mailto:security@canvastack.com"
+	},
 	"autoload" : {
 		"psr-4" : {
 			"Canvastack\\Origin\\" : "src/"

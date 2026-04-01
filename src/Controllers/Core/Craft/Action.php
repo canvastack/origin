@@ -121,15 +121,63 @@ trait Action {
 	}
 	
 	private $objectInjection = [];
+	
+	/**
+	 * Set object injection for POST DataTables processing
+	 * 
+	 * @param array $object DataTables configuration
+	 * @return \Illuminate\Http\JsonResponse
+	 */
 	public function setObjectInjection($object) {
 		$this->objectInjection = $object;
-		dd($object);
+		return $this->processDataTablesPost($object);
 	}
 	
-	private function CHECK_DATATABLES_ACCESS_PROCESSOR() {
-		if (!empty($_POST['draw']) && !empty($_POST['columns'][0]['data']) && !empty($_POST['length'])) {
-			dd($this->objectInjection);
+	/**
+	 * Process DataTables POST request
+	 * Handles POST ajax requests from DataTables
+	 * 
+	 * @param array $object DataTables configuration
+	 * @return \Illuminate\Http\JsonResponse
+	 */
+	private function processDataTablesPost($object) {
+		if (empty($object['datatables'])) {
+			return response()->json(['error' => 'No datatables configuration'], 400);
 		}
+		
+		$config = $object['datatables'];
+		$DataTables = new \Canvastack\Origin\Library\Components\Table\Craft\Datatables();
+		
+		// Parse POST request (includes filter parameters)
+		$postData = $DataTables->parsePostRequest(request());
+		
+		// Pass $postData as filters parameter
+		// $postData contains all POST body data including custom filter parameters
+		// processPost() will convert it to GET format and pass to process()
+		$result = $DataTables->processPost(
+			$postData,
+			$config['datatables'],
+			$postData,  // Pass postData as filters (contains filter parameters)
+			$config['model_filters'] ?? []
+		);
+		
+		// Return result directly (already JSON response from Yajra DataTables)
+		return $result;
+	}
+	
+	/**
+	 * Check DataTables access processor
+	 * Now properly handles POST DataTables request and stops execution
+	 */
+	private function CHECK_DATATABLES_ACCESS_PROCESSOR() {
+		// Check if this is a DataTables POST request
+		if (!empty($_POST['draw']) && !empty($_POST['columns']) && !empty($_POST['length'])) {
+			// POST DataTables request detected
+			// This should be handled by View.php render() method, not INSERT_DATA_PROCESSOR
+			// Return special marker to stop INSERT_DATA_PROCESSOR execution
+			return 'DATATABLES_POST_REQUEST';
+		}
+		return false;
 	}
 	
 	private function INSERT_DATA_PROCESSOR(Request $request, $routeback = true) {
@@ -142,7 +190,12 @@ trait Action {
 			}
 		}
 		
-		$this->CHECK_DATATABLES_ACCESS_PROCESSOR();
+		// Check if this is DataTables POST request
+		$datatables_check = $this->CHECK_DATATABLES_ACCESS_PROCESSOR();
+		if ('DATATABLES_POST_REQUEST' === $datatables_check) {
+			// Stop execution - this request should be handled by View.php render()
+			return response()->json(['error' => 'DataTables POST request should not reach INSERT_DATA_PROCESSOR'], 500);
+		}
 		if (!empty($this->exportRedirection) && true == $_POST['exportData']) {
 			echo redirect($this->exportRedirection);
 			exit;
@@ -168,7 +221,7 @@ trait Action {
 		}
 	}
 	
-	protected function store(Request $request) {		
+	protected function store(Request $request) {
 		$this->INSERT_DATA_PROCESSOR($request);
 		
 		if (true === $this->store_routeback) {

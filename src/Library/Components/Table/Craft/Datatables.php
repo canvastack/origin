@@ -7,19 +7,66 @@ use Yajra\DataTables\DataTables as DataTable;
 use Illuminate\Support\Facades\DB;
 
 /**
+ * Datatables Component - Dynamic DataTables Generator
+ * 
+ * Generates server-side DataTables with advanced features including:
+ * - Dynamic model initialization from configuration
+ * - Automatic relationship handling (joins and eager loading)
+ * - Advanced filtering with multiple conditions
+ * - Image column detection and rendering
+ * - Action button generation with privilege checking
+ * - Formula and data formatting support
+ * - Comprehensive security validation
+ * - Performance optimization (eager loading, caching)
+ * 
+ * SECURITY FEATURES:
+ * - Table/connection whitelist validation
+ * - Input validation for all public methods
+ * - SQL injection prevention via query builder
+ * - XSS protection for all outputs
+ * - Path traversal protection
+ * - Comprehensive error handling with logging
+ * 
+ * PERFORMANCE FEATURES:
+ * - Eager loading for Eloquent relations (prevents N+1)
+ * - Image validation caching
+ * - Optimized query building
+ * 
+ * USAGE EXAMPLE:
+ * ```php
+ * $datatables = new Datatables();
+ * 
+ * // Process DataTables request
+ * $result = $datatables->process(
+ *     $request->all(),           // Method parameters (difta, start, length, etc.)
+ *     $tableConfig,              // Table configuration object
+ *     $filters,                  // Additional filters (optional)
+ *     $filterPage                // Page filters (optional)
+ * );
+ * 
+ * // Initialize filter dropdown
+ * $options = $datatables->init_filter_datatables(
+ *     $_GET,                     // GET parameters
+ *     $_POST,                    // POST parameters
+ *     'mysql'                    // Connection name (optional)
+ * );
+ * ```
  * Created on 21 Apr 2021
  * Time Created : 12:45:06
- *
- * @filesource Datatables.php
- *
+ * 
+ * @package    Canvastack\Origin\Library\Components\Table\Craft
  * @author     wisnuwidi@canvastack.com - 2021
  * @copyright  wisnuwidi
- * @email      wisnuwidi@canvastack.com
+ * @version    2.0.0 (with Phase 1 Security + Phase 2 Performance)
+ * @since      21 Apr 2021
+ * 
+ * @see        \Yajra\DataTables\DataTables
+ * @see        \Canvastack\Origin\Models\Admin\System\DynamicTables
  */
 class Datatables {
 	use Privileges;
 	
-	// Constants
+	// Constants - Configuration
 	private const DEFAULT_LIMIT_START  = 0;
 	private const DEFAULT_LIMIT_LENGTH = 10;
 	private const BLACKLIST_FIELDS     = ['password', 'action', 'no'];
@@ -27,18 +74,164 @@ class Datatables {
 	private const DEFAULT_ACTIONS      = ['view', 'insert', 'edit', 'delete'];
 	private const AJAX_RESERVED_PARAMS = ['renderDataTables', 'draw', 'columns', 'order', 'start', 'length', 'search', 'difta', '_token', '_'];
 	
+	// Constants - Magic Values
+	private const ADMIN_ROLE_GROUP     = 1;
+	private const IMAGE_ALT_PREFIX     = 'imgsrc::';
+	private const THUMBNAIL_PREFIX     = 'tnail_';
+	private const THUMBNAIL_FOLDER     = 'thumb';
+	private const NULL_CONDITION       = '#null';
+	
+	// Properties
 	public  $filter_model  = [];
 	private $image_checker = ['jpg', 'jpeg', 'png', 'gif'];
 	
+	// PERFORMANCE: Cache untuk image validation
+	private $imageValidationCache = [];
+	
+	/**
+	 * Constructor
+	 */
 	public function __construct() {}
 	
 	/**
-	 * Set asset path with optional HTTP URL conversion
+	 * Validate table name against whitelist
+	 * SECURITY: Prevents unauthorized table access
 	 *
-	 * @param string $file_path
-	 * @param boolean $http
-	 * @param string $public_path
-	 * @return string
+	 * @param string $table Table name to validate
+	 * @return string Validated table name
+	 * @throws \InvalidArgumentException If table not in whitelist
+	 */
+	private function validateTableName($table) {
+		// Get allowed tables from config or use default whitelist
+		$allowedTables = config('datatables.allowed_tables', []);
+		
+		// If no whitelist configured, get all tables from database
+		if (empty($allowedTables)) {
+			try {
+				$allowedTables = \DB::connection()->getDoctrineSchemaManager()->listTableNames();
+			} catch (\Exception $e) {
+				\Log::warning('Datatables: Could not get table list', ['error' => $e->getMessage()]);
+				$allowedTables = [];
+			}
+		}
+		
+		// Validate table name
+		if (!in_array($table, $allowedTables)) {
+			\Log::warning('Datatables: Invalid table access attempt', [
+				'table' => $table,
+				'allowed' => $allowedTables
+			]);
+			throw new \InvalidArgumentException('Invalid table name');
+		}
+		
+		return $table;
+	}
+	
+	/**
+	 * Validate database connection name
+	 * SECURITY: Prevents unauthorized connection access
+	 *
+	 * @param string|null $connection Connection name to validate
+	 * @return string|null Validated connection name
+	 * @throws \InvalidArgumentException If connection not valid
+	 */
+	private function validateConnection($connection) {
+		// Null connection is valid (uses default)
+		if ($connection === null) {
+			return null;
+		}
+		
+		// Get allowed connections from config
+		$allowedConnections = array_keys(config('database.connections', []));
+		
+		// Validate connection name
+		if (!in_array($connection, $allowedConnections)) {
+			\Log::warning('Datatables: Invalid connection access attempt', [
+				'connection' => $connection,
+				'allowed' => $allowedConnections
+			]);
+			throw new \InvalidArgumentException('Invalid connection name');
+		}
+		
+		return $connection;
+	}
+	
+	/**
+	 * Validate process method inputs
+	 * SECURITY: Ensures all required parameters are present and valid
+	 *
+	 * @param array $method Method parameters
+	 * @param object $data Data configuration
+	 * @throws \InvalidArgumentException If validation fails
+	 */
+	private function validateProcessInputs($method, $data) {
+		// Validate method parameter
+		if (!is_array($method)) {
+			throw new \InvalidArgumentException('Method parameter must be an array');
+		}
+		
+		// Validate data parameter
+		if (!is_object($data)) {
+			throw new \InvalidArgumentException('Data parameter must be an object');
+		}
+		
+		if (!isset($data->datatables)) {
+			throw new \InvalidArgumentException('Data object must have datatables property');
+		}
+		
+		// Validate required method keys
+		if (!isset($method['difta']) || !is_array($method['difta'])) {
+			throw new \InvalidArgumentException('Method must have difta array');
+		}
+		
+		if (!isset($method['difta']['name'])) {
+			throw new \InvalidArgumentException('Method difta must have name');
+		}
+	}
+	
+	/**
+	 * Validate filter inputs
+	 * SECURITY: Sanitizes filter data to prevent injection
+	 *
+	 * @param array $get GET parameters
+	 * @param array $post POST parameters
+	 * @throws \InvalidArgumentException If validation fails
+	 */
+	private function validateFilterInputs($get, $post) {
+		// Validate get parameter
+		if (!is_array($get)) {
+			throw new \InvalidArgumentException('GET parameter must be an array');
+		}
+		
+		// Validate post parameter
+		if (!is_array($post)) {
+			throw new \InvalidArgumentException('POST parameter must be an array');
+		}
+		
+		// Check required GET parameter
+		if (empty($get['filterDataTables'])) {
+			throw new \InvalidArgumentException('Missing filterDataTables parameter');
+		}
+		
+		// Check required POST parameter
+		if (!isset($post['_fita'])) {
+			throw new \InvalidArgumentException('Missing _fita parameter');
+		}
+	}
+	
+	/**
+	 * Set asset path with optional HTTP URL conversion
+	 * 
+	 * Converts file path to full system path or HTTP URL.
+	 * Includes path traversal protection.
+	 * 
+	 * SECURITY: Sanitizes file path to prevent path traversal attacks
+	 *
+	 * @param string $file_path Relative file path
+	 * @param boolean $http Convert to HTTP URL if true
+	 * @param string $public_path Public directory name (default: 'public')
+	 * 
+	 * @return string Full system path or HTTP URL
 	 */
 	private function setAssetPath($file_path, $http = false, $public_path = 'public') {
 		// Sanitize file path untuk mencegah path traversal
@@ -58,9 +251,16 @@ class Datatables {
 	
 	/**
 	 * Sanitize file path to prevent path traversal attacks
+	 * 
+	 * Removes dangerous path sequences:
+	 * - ../ and ..\ (directory traversal)
+	 * - Absolute path indicators (C:\, /)
+	 * 
+	 * SECURITY: Critical for preventing unauthorized file access
 	 *
-	 * @param string $path
-	 * @return string
+	 * @param string $path File path to sanitize
+	 * 
+	 * @return string Sanitized path (relative, safe)
 	 */
 	private function sanitizeFilePath($path) {
 		// Remove any ../ or ..\\ sequences
@@ -75,12 +275,26 @@ class Datatables {
 	
 	/**
 	 * Check if file is a valid image
+	 * 
+	 * Validates if file exists and has valid image extension.
+	 * Returns HTML error message if file doesn't exist.
+	 * 
+	 * PERFORMANCE: Results are cached to prevent repeated file checks
+	 * SECURITY: XSS protection for error messages
+	 * 
+	 * Supported extensions: jpg, jpeg, png, gif
 	 *
-	 * @param string $string
-	 * @param boolean $local_path
-	 * @return boolean|string
+	 * @param string $string File path to check
+	 * @param boolean $local_path Use local path (default: true)
+	 * 
+	 * @return boolean|string True if valid image, false if not image, HTML string if file missing
 	 */
 	private function checkValidImage($string, $local_path = true) {
+		// PERFORMANCE: Check cache first
+		if (isset($this->imageValidationCache[$string])) {
+			return $this->imageValidationCache[$string];
+		}
+		
 		$filePath = $this->setAssetPath($string);
 		
 		if (true === file_exists($filePath)) {
@@ -93,6 +307,8 @@ class Datatables {
 				}
 			}
 			
+			// PERFORMANCE: Cache result
+			$this->imageValidationCache[$string] = $isValidImage;
 			return $isValidImage;
 			
 		} else {
@@ -104,82 +320,159 @@ class Datatables {
 			$safeLastFile = htmlspecialchars($lastFile, ENT_QUOTES, 'UTF-8');
 			$info = "This File [ {$safeLastFile} ] Do Not or Never Exist!";
 			
-			return "<div class=\"show-hidden-on-hover missing-file\" title=\"{$info}\"><i class=\"fa fa-warning\"></i>&nbsp;{$safeLastFile}</div>";
+			$result = "<div class=\"show-hidden-on-hover missing-file\" title=\"{$info}\"><i class=\"fa fa-warning\"></i>&nbsp;{$safeLastFile}</div>";
+			
+			// PERFORMANCE: Cache result
+			$this->imageValidationCache[$string] = $result;
+			return $result;
 		}
 	}
 
 	/**
 	 * Main process method untuk generate datatables
+	 * 
+	 * Processes DataTables AJAX request and returns formatted JSON response.
+	 * Handles complete DataTables lifecycle including:
+	 * - Model initialization from configuration
+	 * - Privilege-based action filtering
+	 * - Relationship handling (joins and eager loading)
+	 * - Condition and filter application
+	 * - Pagination and ordering
+	 * - Image column detection and rendering
+	 * - Action button generation
+	 * - Formula and data formatting
+	 * 
+	 * SECURITY: Added input validation and error handling
+	 * PERFORMANCE: Includes eager loading for relations
 	 *
-	 * @param array $method
-	 * @param object $data
-	 * @param array $filters
-	 * @param array $filter_page
-	 * @return mixed
+	 * @param array $method Request parameters including:
+	 *   - difta: array Table identifier
+	 *     - name: string Table name
+	 *   - start: int Pagination start offset (default: 0)
+	 *   - length: int Page size (default: 10)
+	 *   - draw: int Request counter
+	 *   - search: array Search parameters
+	 *   - order: array Ordering parameters
+	 * 
+	 * @param object $data Table configuration object with:
+	 *   - datatables: object Main configuration
+	 *     - model: array Model class mappings
+	 *     - columns: array Column configurations
+	 *       - lists: array Visible columns
+	 *       - foreign_keys: array Join definitions
+	 *       - relations: array Eloquent relations
+	 *       - formulas: array Calculated columns
+	 *       - formats: array Data formatters
+	 *     - conditions: array Where clauses
+	 *     - actions: array Action button configs
+	 *     - modelProcessing: array Model processors
+	 * 
+	 * @param array $filters Additional filter conditions (optional)
+	 *   Format: [['field_name' => 'column', 'value' => 'filter_value'], ...]
+	 * 
+	 * @param array $filter_page Page-specific filters (optional)
+	 * 
+	 * @return mixed DataTables JSON response array with:
+	 *   - draw: int Request counter
+	 *   - recordsTotal: int Total records
+	 *   - recordsFiltered: int Filtered records
+	 *   - data: array Table rows
+	 *   Returns null on error
+	 * 
+	 * @throws \InvalidArgumentException If invalid inputs (caught and logged)
+	 * @throws \Exception If database query fails (caught and logged)
 	 */
 	public function process($method, $data, $filters = [], $filter_page = []) {
-		
-		// Initialize model dan table name
-		$modelInfo = $this->initializeModel($method, $data);
-		if (empty($modelInfo)) {
+		try {
+			// SECURITY: Validate inputs
+			$this->validateProcessInputs($method, $data);
+			
+			// Initialize model dan table name
+			$modelInfo = $this->initializeModel($method, $data);
+			if (empty($modelInfo)) {
+				\Log::warning('Datatables: Model initialization failed', [
+					'method' => $method['difta']['name'] ?? 'unknown'
+				]);
+				return null;
+			}
+			
+			$model_data = $modelInfo['model_data'];
+			$table_name = $modelInfo['table_name'];
+			
+			// Check if any model processing needed
+			if (isset($data->datatables->modelProcessing[$table_name])) {
+				canvastack_model_processing_table($data->datatables->modelProcessing, $table_name);
+			}
+			
+			// Setup privileges dan actions
+			$actionConfig = $this->setupActionConfig($data, $table_name);
+			
+			// Setup field configuration
+			$fieldConfig = $this->setupFieldConfig($data, $table_name);
+			
+			// Apply relationships (joins)
+			$joinResult = $this->applyRelationships($model_data, $data, $table_name);
+			$model_data = $joinResult['model'];
+			$joinFields = $joinResult['joinFields'];
+			
+			// Apply conditions (where clauses)
+			$model_condition = $this->applyConditions($model_data, $data, $table_name);
+			
+			// Apply filters
+			$filterResult = $this->applyFilters($model_condition, $filters, $table_name, $fieldConfig['firstField']);
+			$model        = $filterResult['model'];
+			$limitTotal   = $filterResult['limitTotal'];
+			
+			// Apply pagination
+			$limit = $this->applyPagination($model, $limitTotal);
+			
+			// Build datatables
+			$datatables = $this->buildDatatables($model, $limit, $fieldConfig['blacklists']);
+			
+			// Apply ordering
+			$this->applyOrdering($datatables, $data, $table_name);
+			
+			// Process rows
+			$this->processRows($model, $datatables, $data, $table_name, $joinFields);
+			
+			// Setup row attributes (clickable)
+			$this->setupRowAttributes($datatables, $data, $table_name);
+			
+			// Add action column
+			$this->addActionColumn($datatables, $model, $actionConfig, $data);
+			
+			// Generate final table data
+			return $this->generateTableData($datatables, $data);
+			
+		} catch (\InvalidArgumentException $e) {
+			\Log::warning('Datatables: Input validation failed', [
+				'error' => $e->getMessage(),
+				'method' => $method['difta']['name'] ?? 'unknown'
+			]);
+			return null;
+		} catch (\Exception $e) {
+			\Log::error('Datatables: Process failed', [
+				'error' => $e->getMessage(),
+				'method' => $method['difta']['name'] ?? 'unknown',
+				'trace' => $e->getTraceAsString()
+			]);
 			return null;
 		}
-		
-		$model_data = $modelInfo['model_data'];
-		$table_name = $modelInfo['table_name'];
-		
-		// Check if any model processing needed
-		if (isset($data->datatables->modelProcessing[$table_name])) {
-			canvastack_model_processing_table($data->datatables->modelProcessing, $table_name);
-		}
-		
-		// Setup privileges dan actions
-		$actionConfig = $this->setupActionConfig($data, $table_name);
-		
-		// Setup field configuration
-		$fieldConfig = $this->setupFieldConfig($data, $table_name);
-		
-		// Apply relationships (joins)
-		$joinResult = $this->applyRelationships($model_data, $data, $table_name);
-		$model_data = $joinResult['model'];
-		$joinFields = $joinResult['joinFields'];
-		
-		// Apply conditions (where clauses)
-		$model_condition = $this->applyConditions($model_data, $data, $table_name);
-		
-		// Apply filters
-		$filterResult = $this->applyFilters($model_condition, $filters, $table_name, $fieldConfig['firstField']);
-		$model        = $filterResult['model'];
-		$limitTotal   = $filterResult['limitTotal'];
-		
-		// Apply pagination
-		$limit = $this->applyPagination($model, $limitTotal);
-		
-		// Build datatables
-		$datatables = $this->buildDatatables($model, $limit, $fieldConfig['blacklists']);
-		
-		// Apply ordering
-		$this->applyOrdering($datatables, $data, $table_name);
-		
-		// Process rows
-		$this->processRows($model, $datatables, $data, $table_name, $joinFields);
-		
-		// Setup row attributes (clickable)
-		$this->setupRowAttributes($datatables, $data, $table_name);
-		
-		// Add action column
-		$this->addActionColumn($datatables, $model, $actionConfig, $data);
-		
-		// Generate final table data
-		return $this->generateTableData($datatables, $data);
 	}
 
 	/**
-	 * Initialize model dan table name
+	 * Initialize model and table name from configuration
+	 * 
+	 * Extracts model class and table name from configuration object.
+	 * Returns null if model not found in configuration.
 	 *
-	 * @param array $method
-	 * @param object $data
-	 * @return array|null
+	 * @param array $method Request parameters with difta.name
+	 * @param object $data Configuration object with datatables.model mapping
+	 * 
+	 * @return array|null Array with keys:
+	 *   - model_data: mixed Eloquent model or query builder instance
+	 *   - table_name: string Database table name
+	 *   Returns null if model not configured
 	 */
 	private function initializeModel($method, $data) {
 		if (empty($data->datatables->model[$method['difta']['name']])) {
@@ -210,19 +503,23 @@ class Datatables {
 	}
 	
 	/**
-	 * Setup action configuration berdasarkan privileges
-	 *
-	 * @param object $data
-	 * @param string $table_name
-	 * @return array
-	 */
-	/**
-	 * Setup action configuration for datatables
-	 * Refactored to reduce nesting from 8 to 2 levels
+	 * Setup action configuration based on user privileges
 	 * 
-	 * @param object $data Table data
-	 * @param string $table_name Table name
-	 * @return array Action configuration
+	 * Determines which action buttons should be displayed based on:
+	 * - User role and privileges
+	 * - Table-specific action configuration
+	 * - Explicitly removed buttons
+	 * 
+	 * Refactored to reduce nesting from 8 to 2 levels.
+	 * 
+	 * @param object $data Table configuration with datatables.columns
+	 * @param string $table_name Database table name
+	 * 
+	 * @return array Action configuration with keys:
+	 *   - privileges: array User privilege information
+	 *   - action_list: array|false Available actions or false if none
+	 *   - removed_privileges: array Actions removed by privilege check
+	 *   - buttonsRemoval: array Explicitly removed buttons
 	 */
 	private function setupActionConfig($data, $table_name) {
 		$privileges = $this->set_module_privileges();
@@ -260,9 +557,13 @@ class Datatables {
 	/**
 	 * Extract action list from column configuration
 	 * 
-	 * @param array $column_data Column data
-	 * @param string $table_name Table name
-	 * @return array|false Action list or false
+	 * Determines available actions from table configuration.
+	 * Returns default actions if true, custom actions if array, or false if none.
+	 * 
+	 * @param array $column_data Column configuration array
+	 * @param string $table_name Database table name
+	 * 
+	 * @return array|false Array of action names ['view', 'edit', 'delete', ...] or false
 	 */
 	private function extractActionList($column_data, $table_name) {
 		if (!isset($column_data[$table_name]['actions'])) {
@@ -285,13 +586,19 @@ class Datatables {
 	/**
 	 * Filter actions based on user privileges
 	 * 
-	 * @param array $action_list Full action list
-	 * @param array $privileges User privileges
-	 * @return array Filtered action list
+	 * Removes actions that user doesn't have permission to perform.
+	 * Admin users (role_group <= 1) bypass privilege checking.
+	 * 
+	 * @param array $action_list Full list of available actions
+	 * @param array $privileges User privilege information with:
+	 *   - role_group: int User role group level
+	 *   - role: array User role permissions
+	 * 
+	 * @return array Filtered action list (empty if admin or no privileges)
 	 */
 	private function filterActionsByPrivileges($action_list, $privileges) {
 		// If role_group <= 1, no filtering needed (admin/superadmin)
-		if ($privileges['role_group'] <= 1) {
+		if ($privileges['role_group'] <= self::ADMIN_ROLE_GROUP) {
 			return [];
 		}
 		
@@ -406,11 +713,17 @@ class Datatables {
 	}
 	
 	/**
-	 * Setup field configuration
-	 *
-	 * @param object $data
-	 * @param string $table_name
-	 * @return array
+	 * Setup field configuration for DataTables
+	 * 
+	 * Determines first field and blacklist based on table configuration.
+	 * Used for default filtering and column visibility.
+	 * 
+	 * @param object $data Table configuration with datatables.columns
+	 * @param string $table_name Database table name
+	 * 
+	 * @return array Field configuration with keys:
+	 *   - firstField: string First visible field (default: 'id')
+	 *   - blacklists: array Fields to hide from display
 	 */
 	private function setupFieldConfig($data, $table_name) {
 		$firstField = 'id';
@@ -429,11 +742,22 @@ class Datatables {
 
 	/**
 	 * Apply relationships (joins) to model
+	 * 
+	 * Handles both SQL joins (foreign_keys) and Eloquent relations.
+	 * Automatically selects all fields from joined tables.
+	 * Applies eager loading for Eloquent relations to prevent N+1 queries.
+	 * 
+	 * PERFORMANCE: Includes eager loading optimization
 	 *
-	 * @param mixed $model_data
-	 * @param object $data
-	 * @param string $table_name
-	 * @return array
+	 * @param mixed $model_data Eloquent model or query builder instance
+	 * @param object $data Table configuration with:
+	 *   - datatables->columns->foreign_keys: array Join definitions
+	 *   - datatables->columns->relations: array Eloquent relations
+	 * @param string $table_name Database table name
+	 * 
+	 * @return array Result with keys:
+	 *   - model: mixed Modified model with joins and eager loading
+	 *   - joinFields: array Selected fields from joins
 	 */
 	private function applyRelationships($model_data, $data, $table_name) {
 		$joinFields = [];
@@ -460,6 +784,9 @@ class Datatables {
 			$model_data = $model_data->select($joinFields);
 		}
 		
+		// PERFORMANCE: Apply eager loading for Eloquent relations
+		$model_data = $this->applyEagerLoading($model_data, $data, $table_name);
+		
 		return [
 			'model'      => $model_data,
 			'joinFields' => $joinFields
@@ -467,12 +794,59 @@ class Datatables {
 	}
 	
 	/**
-	 * Apply conditions (where clauses) to model
+	 * Apply eager loading for Eloquent relationships
+	 * 
+	 * Prevents N+1 query problem by loading all relations at once.
+	 * Only applies to Eloquent models (checks for 'with' method).
+	 * Automatically extracts relation names from configuration.
+	 * 
+	 * PERFORMANCE: Reduces N queries to 1 query for relations
+	 * 
+	 * Example:
+	 * Before: 1 query + N queries (one per row for each relation)
+	 * After: 1 query + 1 query (all relations loaded at once)
 	 *
-	 * @param mixed $model_data
-	 * @param object $data
-	 * @param string $table_name
-	 * @return mixed
+	 * @param mixed $model_data Eloquent model or query builder instance
+	 * @param object $data Table configuration with datatables.columns.relations
+	 * @param string $table_name Database table name
+	 * 
+	 * @return mixed Model with eager loading applied (or unchanged if not applicable)
+	 */
+	private function applyEagerLoading($model_data, $data, $table_name) {
+		// Check if model has relations defined
+		if (!isset($data->datatables->columns[$table_name]['relations'])) {
+			return $model_data;
+		}
+		
+		$relations = $data->datatables->columns[$table_name]['relations'];
+		
+		// Only apply eager loading if model is Eloquent (has 'with' method)
+		if (!method_exists($model_data, 'with')) {
+			return $model_data;
+		}
+		
+		// Extract relation names
+		$relationNames = array_keys($relations);
+		
+		if (!empty($relationNames)) {
+			// PERFORMANCE: Eager load all relations at once
+			$model_data = $model_data->with($relationNames);
+		}
+		
+		return $model_data;
+	}
+	
+	/**
+	 * Apply conditions (where clauses) to model
+	 * 
+	 * Applies configured where conditions from table configuration.
+	 * Supports both regular where and whereIn conditions.
+	 *
+	 * @param mixed $model_data Eloquent model or query builder instance
+	 * @param object $data Table configuration with datatables.conditions
+	 * @param string $table_name Database table name
+	 * 
+	 * @return mixed Model with conditions applied
 	 */
 	private function applyConditions($model_data, $data, $table_name) {
 		$model_condition  = $model_data;
@@ -1097,7 +1471,7 @@ class Datatables {
 		// SECURITY: Escape untuk mencegah XSS di HTML attribute
 		$safeLabel = htmlspecialchars($label, ENT_QUOTES, 'UTF-8');
 		$safeFilePath = htmlspecialchars($displayPath, ENT_QUOTES, 'UTF-8');
-		$alt = "imgsrc::{$safeLabel}";
+		$alt = self::IMAGE_ALT_PREFIX . $safeLabel;
 		
 		return canvastack_unescape_html("<center><img class=\"CanvaStack-img-thumb\" src=\"{$safeFilePath}\" alt=\"{$alt}\" /></center>");
 	}
@@ -1121,7 +1495,7 @@ class Datatables {
 		unset($pathParts[$lastIndex]);
 		
 		// Build thumbnail path
-		$thumbPath = implode('/', $pathParts) . '/thumb/tnail_' . $fileName;
+		$thumbPath = implode('/', $pathParts) . '/' . self::THUMBNAIL_FOLDER . '/' . self::THUMBNAIL_PREFIX . $fileName;
 		
 		// Check if thumbnail exists
 		if (!empty($this->setAssetPath($thumbPath))) {
@@ -1156,27 +1530,119 @@ class Datatables {
 	}
 	
 	/**
-	 * Initialize filter datatables - CRITICAL: SQL Injection Fixed
+	 * Initialize filter datatables for dropdown options
 	 * 
-	 * Original code menggunakan raw SQL dengan user input langsung.
-	 * Refactored untuk menggunakan query builder dengan parameter binding.
+	 * Generates distinct values for filter dropdowns in DataTables.
+	 * Handles complex filtering with joins, conditions, and previous selections.
+	 * 
+	 * SECURITY: Enhanced with validation and SQL injection prevention
+	 * PERFORMANCE: Refactored with extracted sub-methods for better readability
+	 * 
+	 * Uses query builder with parameter binding to prevent SQL injection.
+	 * Validates table names and connections against whitelists.
+	 * 
+	 * Filter Format (_fita):
+	 * "filterType::tableName::targetField::previousConditions"
+	 * 
+	 * Example:
+	 * ```php
+	 * $options = $datatables->init_filter_datatables(
+	 *     ['filterDataTables' => true],
+	 *     [
+	 *         '_fita' => 'select::users::name::#null',
+	 *         '_forKeys' => '{"users.role_id":"roles.id"}',
+	 *         'status' => 'active'
+	 *     ],
+	 *     'mysql'
+	 * );
+	 * ```
 	 *
-	 * @param array $get
-	 * @param array $post
-	 * @param string|null $connection
-	 * @return mixed
+	 * @param array $get GET parameters with:
+	 *   - filterDataTables: bool Filter flag (required)
+	 * 
+	 * @param array $post POST parameters with:
+	 *   - _fita: string Filter configuration (format: type::table::field::prev)
+	 *   - _forKeys: string JSON encoded foreign key joins (optional)
+	 *   - _canvastackF: array Additional filter conditions (optional)
+	 *   - grabCanvaStackC: string Connection name override (optional)
+	 *   - [field]: mixed Additional where conditions
+	 * 
+	 * @param string|null $connection Database connection name (optional, uses default if null)
+	 * 
+	 * @return \Illuminate\Support\Collection|null Collection of distinct values or null on error
+	 * 
+	 * @throws \InvalidArgumentException If validation fails (caught and logged)
+	 * @throws \Exception If database query fails (caught and logged)
 	 */
 	public function init_filter_datatables($get = [], $post = [], $connection = null) {
-		
-		if (empty($get['filterDataTables'])) {
+		try {
+			// SECURITY: Validate inputs
+			$this->validateFilterInputs($get, $post);
+			
+			// PERFORMANCE: Extract filter parameters
+			$filterParams = $this->extractFilterParameters($post, $connection);
+			
+			// PERFORMANCE: Build filter query
+			$query = $this->buildFilterQuery($filterParams);
+			
+			// Execute query dengan parameter binding (SECURE)
+			$results = $query->distinct()->select($filterParams['safeTarget'])->get();
+			
+			return $results;
+			
+		} catch (\InvalidArgumentException $e) {
+			\Log::warning('Datatables: Filter validation failed', [
+				'error' => $e->getMessage(),
+				'get' => $get,
+				'post' => array_keys($post)
+			]);
+			return null;
+		} catch (\Exception $e) {
+			\Log::error('Datatables: Filter initialization failed', [
+				'error' => $e->getMessage(),
+				'trace' => $e->getTraceAsString()
+			]);
 			return null;
 		}
-		
+	}
+	
+	/**
+	 * Extract and validate filter parameters from request
+	 * 
+	 * Parses and validates all filter-related parameters including:
+	 * - Connection name
+	 * - Filter conditions
+	 * - Table and target field from _fita
+	 * - Foreign key joins
+	 * - Previous conditions
+	 * 
+	 * PERFORMANCE: Extracted from init_filter_datatables for better readability
+	 * SECURITY: Validates table name and connection
+	 *
+	 * @param array $post POST parameters (passed by reference, modified to remove reserved params)
+	 * @param string|null $connection Database connection name
+	 * 
+	 * @return array Extracted parameters with keys:
+	 *   - connection: string|null Validated connection name
+	 *   - table: string Validated table name
+	 *   - target: string Target field name (original)
+	 *   - safeTarget: string Sanitized target field name
+	 *   - prev: string Previous condition string
+	 *   - filters: array Additional filter conditions
+	 *   - fKeys: array Foreign key join definitions
+	 *   - post: array Remaining POST data for where conditions
+	 * 
+	 * @throws \InvalidArgumentException If validation fails
+	 */
+	private function extractFilterParameters(&$post, $connection) {
 		// Extract connection
 		if (isset($post['grabCanvaStackC'])) {
 			$connection = $post['grabCanvaStackC'];
 			unset($post['grabCanvaStackC']);
 		}
+		
+		// SECURITY: Validate connection
+		$connection = $this->validateConnection($connection);
 		
 		// Extract filters
 		$filters = [];
@@ -1186,88 +1652,339 @@ class Datatables {
 		}
 		
 		// Parse filter data
-		if (!isset($post['_fita'])) {
-			return null;
-		}
-		
 		$fdata  = explode('::', $post['_fita']);
 		if (count($fdata) < 4) {
-			return null;
+			throw new \InvalidArgumentException('Invalid _fita format');
 		}
 		
 		$table  = $fdata[1];
 		$target = $fdata[2];
 		$prev   = $fdata[3];
 		
+		// SECURITY: Validate table name
+		$table = $this->validateTableName($table);
+		
 		// Parse foreign keys
 		$fKeys = [];
 		if (isset($post['_forKeys'])) {
 			$fKeys = json_decode($post['_forKeys'], true);
+			if (!is_array($fKeys)) {
+				$fKeys = [];
+			}
 		}
 		
 		// Remove reserved parameters
 		unset($post['filterDataTables'], $post['_fita'], $post['_token'], $post['_n'], $post['_forKeys']);
 		
-		// Build query menggunakan query builder (SECURE)
-		$query = DB::connection($connection)->table($table);
+		// Sanitize target field name
+		$safeTarget = preg_replace('/[^a-zA-Z0-9_.]/', '', $target);
 		
-		// Apply joins dari foreign keys
-		if (!empty($fKeys)) {
-			foreach ($fKeys as $fqs => $fqt) {
-				$tqs = explode('.', $fqs);
-				$tqsTable = $tqs[0];
-				
+		return [
+			'connection' => $connection,
+			'table' => $table,
+			'target' => $target,
+			'safeTarget' => $safeTarget,
+			'prev' => $prev,
+			'filters' => $filters,
+			'fKeys' => $fKeys,
+			'post' => $post
+		];
+	}
+	
+	/**
+	 * Build filter query with all conditions applied
+	 * 
+	 * Orchestrates query building by applying:
+	 * 1. Foreign key joins
+	 * 2. Where conditions from POST data
+	 * 3. Additional filter queries
+	 * 4. Previous condition filters
+	 * 
+	 * PERFORMANCE: Extracted from init_filter_datatables for better readability
+	 * SECURITY: Uses query builder with parameter binding
+	 *
+	 * @param array $params Filter parameters from extractFilterParameters()
+	 * 
+	 * @return \Illuminate\Database\Query\Builder Query builder instance with all conditions
+	 */
+	private function buildFilterQuery($params) {
+		// Build query menggunakan query builder (SECURE)
+		$query = DB::connection($params['connection'])->table($params['table']);
+		
+		// PERFORMANCE: Apply joins
+		$query = $this->applyFilterJoins($query, $params['fKeys']);
+		
+		// PERFORMANCE: Apply where conditions
+		$query = $this->applyFilterWhereConditions($query, $params['post']);
+		
+		// PERFORMANCE: Apply filter queries
+		$query = $this->applyFilterQueries($query, $params['filters']);
+		
+		// PERFORMANCE: Apply previous conditions
+		$query = $this->applyFilterPreviousConditions($query, $params['prev']);
+		
+		return $query;
+	}
+	
+	/**
+	 * Apply foreign key joins to filter query
+	 * 
+	 * Adds LEFT JOIN clauses for related tables.
+	 * Validates each joined table against whitelist.
+	 * 
+	 * PERFORMANCE: Extracted from init_filter_datatables
+	 * SECURITY: Validates joined table names
+	 *
+	 * @param \Illuminate\Database\Query\Builder $query Query builder instance
+	 * @param array $fKeys Foreign key definitions (format: ['table.field' => 'other_table.field'])
+	 * 
+	 * @return \Illuminate\Database\Query\Builder Modified query with joins
+	 */
+	private function applyFilterJoins($query, $fKeys) {
+		if (empty($fKeys)) {
+			return $query;
+		}
+		
+		foreach ($fKeys as $fqs => $fqt) {
+			$tqs = explode('.', $fqs);
+			$tqsTable = $tqs[0];
+			
+			// SECURITY: Validate joined table
+			try {
+				$tqsTable = $this->validateTableName($tqsTable);
 				$query->leftJoin($tqsTable, $fqs, '=', $fqt);
+			} catch (\InvalidArgumentException $e) {
+				\Log::warning('Datatables: Invalid join table', [
+					'table' => $tqsTable,
+					'error' => $e->getMessage()
+				]);
+				// Skip invalid join
+				continue;
 			}
 		}
 		
-		// Apply where conditions dari POST data (dengan parameter binding)
+		return $query;
+	}
+	
+	/**
+	 * Apply where conditions from POST data to filter query
+	 * 
+	 * Adds WHERE clauses for each POST parameter.
+	 * Sanitizes field names to prevent SQL injection.
+	 * 
+	 * PERFORMANCE: Extracted from init_filter_datatables
+	 * SECURITY: Sanitizes field names, uses parameter binding
+	 *
+	 * @param \Illuminate\Database\Query\Builder $query Query builder instance
+	 * @param array $post POST data (field => value pairs)
+	 * 
+	 * @return \Illuminate\Database\Query\Builder Modified query with where conditions
+	 */
+	private function applyFilterWhereConditions($query, $post) {
 		foreach ($post as $key => $value) {
 			// Sanitize field name untuk mencegah SQL injection
-			$safeKey = preg_replace('/[^a-zA-Z0-9_]/', '', $key);
+			$safeKey = preg_replace('/[^a-zA-Z0-9_.]/', '', $key);
+			if ($safeKey !== $key) {
+				\Log::warning('Datatables: Invalid field name sanitized', [
+					'original' => $key,
+					'sanitized' => $safeKey
+				]);
+			}
 			$query->where($safeKey, '=', $value);
 		}
 		
-		// Apply filter queries (dengan parameter binding)
-		if (!empty($filters)) {
-			foreach ($filters as $filter) {
-				if (!isset($filter['field_name']) || !isset($filter['value'])) {
-					continue;
-				}
-				
-				$fqFieldName = preg_replace('/[^a-zA-Z0-9_]/', '', $filter['field_name']);
-				$fqDataValue = $filter['value'];
-				
-				if (is_array($fqDataValue)) {
-					$query->whereIn($fqFieldName, $fqDataValue);
-				} else {
-					$query->where($fqFieldName, '=', $fqDataValue);
-				}
+		return $query;
+	}
+	
+	/**
+	 * Apply additional filter queries to filter query
+	 * 
+	 * Adds WHERE or WHERE IN clauses from filter array.
+	 * Supports both single values and array values (whereIn).
+	 * 
+	 * PERFORMANCE: Extracted from init_filter_datatables
+	 * SECURITY: Sanitizes field names, uses parameter binding
+	 *
+	 * @param \Illuminate\Database\Query\Builder $query Query builder instance
+	 * @param array $filters Filter array with format:
+	 *   [['field_name' => 'column', 'value' => 'single_value'], ...]
+	 *   or [['field_name' => 'column', 'value' => ['array', 'values']], ...]
+	 * 
+	 * @return \Illuminate\Database\Query\Builder Modified query with filter conditions
+	 */
+	private function applyFilterQueries($query, $filters) {
+		if (empty($filters)) {
+			return $query;
+		}
+		
+		foreach ($filters as $filter) {
+			if (!isset($filter['field_name']) || !isset($filter['value'])) {
+				continue;
+			}
+			
+			$fqFieldName = preg_replace('/[^a-zA-Z0-9_.]/', '', $filter['field_name']);
+			$fqDataValue = $filter['value'];
+			
+			if (is_array($fqDataValue)) {
+				$query->whereIn($fqFieldName, $fqDataValue);
+			} else {
+				$query->where($fqFieldName, '=', $fqDataValue);
 			}
 		}
 		
-		// Apply previous conditions
-		if ('#null' !== $prev) {
-			$previous  = explode("#", $prev);
-			if (count($previous) >= 2) {
-				$preFields = explode('|', $previous[0]);
-				$preFieldt = explode('|', $previous[1]);
-				
-				foreach ($preFields as $idf => $prev_field) {
-					if (isset($preFieldt[$idf])) {
-						$safeField = preg_replace('/[^a-zA-Z0-9_]/', '', $prev_field);
-						$query->where($safeField, '=', $preFieldt[$idf]);
-					}
-				}
+		return $query;
+	}
+	
+	/**
+	 * Apply previous conditions to filter query
+	 * 
+	 * Applies cascading filter conditions from previous filter selections.
+	 * Used for dependent dropdowns (e.g., Province -> City -> District).
+	 * 
+	 * PERFORMANCE: Extracted from init_filter_datatables
+	 * SECURITY: Sanitizes field names, uses parameter binding
+	 * 
+	 * Previous Condition Format:
+	 * "field1|field2|field3#value1|value2|value3"
+	 *
+	 * @param \Illuminate\Database\Query\Builder $query Query builder instance
+	 * @param string $prev Previous condition string (format: "fields#values" or "#null")
+	 * 
+	 * @return \Illuminate\Database\Query\Builder Modified query with previous conditions
+	 */
+	private function applyFilterPreviousConditions($query, $prev) {
+		if (self::NULL_CONDITION === $prev) {
+			return $query;
+		}
+		
+		$previous = explode("#", $prev);
+		if (count($previous) < 2) {
+			return $query;
+		}
+		
+		$preFields = explode('|', $previous[0]);
+		$preFieldt = explode('|', $previous[1]);
+		
+		foreach ($preFields as $idf => $prev_field) {
+			if (isset($preFieldt[$idf])) {
+				$safeField = preg_replace('/[^a-zA-Z0-9_.]/', '', $prev_field);
+				$query->where($safeField, '=', $preFieldt[$idf]);
 			}
 		}
 		
-		// Sanitize target field name
-		$safeTarget = preg_replace('/[^a-zA-Z0-9_]/', '', $target);
+		return $query;
+	}
+	
+	// ============================================================================
+	// POST METHOD IMPLEMENTATION
+	// ============================================================================
+	
+	/**
+	 * Process POST request from DataTables ajax
+	 * Converts POST format to GET format and calls existing process() method
+	 * SECURITY: Added input validation
+	 * 
+	 * @param array $postData POST request data
+	 * @param object $data Table data configuration
+	 * @param array $filters Additional filters
+	 * @param array $filter_page Page filters
+	 * @return array JSON response for DataTables or null on error
+	 * @throws \InvalidArgumentException If invalid inputs
+	 */
+	public function processPost($postData, $data, $filters = [], $filter_page = []) {
+		try {
+			// SECURITY: Validate inputs
+			if (!is_array($postData)) {
+				throw new \InvalidArgumentException('POST data must be an array');
+			}
+			
+			if (!is_object($data)) {
+				throw new \InvalidArgumentException('Data must be an object');
+			}
+			
+			// Convert POST data to GET format (same format as process() expects)
+			$method = $this->convertPostToGetFormat($postData);
+			
+			// Call existing process() method (reuse all GET logic)
+			return $this->process($method, $data, $filters, $filter_page);
+			
+		} catch (\InvalidArgumentException $e) {
+			\Log::warning('Datatables: POST validation failed', [
+				'error' => $e->getMessage()
+			]);
+			return null;
+		} catch (\Exception $e) {
+			\Log::error('Datatables: POST process failed', [
+				'error' => $e->getMessage(),
+				'trace' => $e->getTraceAsString()
+			]);
+			return null;
+		}
+	}
+	
+	/**
+	 * Convert POST request data to GET format
+	 * DataTables sends different format for POST vs GET
+	 * 
+	 * @param array $postData POST request data
+	 * @return array GET-formatted data
+	 */
+	private function convertPostToGetFormat($postData) {
+		// Extract standard DataTables parameters
+		$method = [
+			'renderDataTables' => true,
+			'draw' => $postData['draw'] ?? 0,
+			'start' => $postData['start'] ?? 0,
+			'length' => $postData['length'] ?? 10,
+			'order' => $postData['order'] ?? [],
+			'columns' => $postData['columns'] ?? [],
+			'search' => $postData['search'] ?? [],
+			'difta' => $postData['difta'] ?? [],
+			'filters' => $postData['filters'] ?? false
+		];
 		
-		// Execute query dengan parameter binding (SECURE)
-		$results = $query->distinct()->select($safeTarget)->get();
+		// Include custom filter parameters
+		// Remove reserved parameters and merge the rest (custom filters)
+		foreach ($postData as $key => $value) {
+			if (!in_array($key, self::AJAX_RESERVED_PARAMS)) {
+				$method[$key] = $value;
+			}
+		}
 		
-		return $results;
+		return $method;
+	}
+	
+	/**
+	 * Parse POST request from Laravel Request object
+	 * Extracts all DataTables parameters from POST body
+	 * 
+	 * @param \Illuminate\Http\Request $request
+	 * @return array Parsed POST data
+	 */
+	public function parsePostRequest($request) {
+		// Extract standard DataTables parameters
+		$postData = [
+			'draw' => $request->input('draw', 0),
+			'start' => $request->input('start', 0),
+			'length' => $request->input('length', 10),
+			'order' => $request->input('order', []),
+			'columns' => $request->input('columns', []),
+			'search' => $request->input('search', []),
+			'difta' => $request->input('difta', []),
+			'filters' => $request->input('filters', false),
+			'_token' => $request->input('_token')
+		];
+		
+		// Extract custom filter parameters (for filtering functionality)
+		// Get all POST data and remove reserved parameters
+		$allInput = $request->all();
+		foreach (self::AJAX_RESERVED_PARAMS as $reserved) {
+			unset($allInput[$reserved]);
+		}
+		
+		// Merge custom filters into postData
+		$postData = array_merge($postData, $allInput);
+		
+		return $postData;
 	}
 }

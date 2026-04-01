@@ -78,6 +78,28 @@ class Controller extends BaseController {
 		if (false !== $route_page) $this->set_route_page($route_page);
 	}
 	
+	/**
+	 * Execute an action on the controller
+	 * INTERCEPT: Check for DataTables POST request before executing any action
+	 * 
+	 * @param string $method
+	 * @param array $parameters
+	 * @return \Symfony\Component\HttpFoundation\Response
+	 */
+	public function callAction($method, $parameters) {
+		// Intercept store() calls to check for DataTables POST request
+		if ('store' === $method) {
+			// Check if this is DataTables POST ajax request
+			if (request()->query('renderDataTables') && request()->isMethod('POST')) {
+				// Delegate to index() method which handles DataTables rendering
+				return $this->index();
+			}
+		}
+		
+		// Continue with normal method execution
+		return parent::callAction($method, $parameters);
+	}
+	
 	private function init_model($model = false) {
 		if (false !== $model) {
 			$routelists  = ['index', 'create', 'edit'];

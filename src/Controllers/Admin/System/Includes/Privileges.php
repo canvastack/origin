@@ -3,6 +3,7 @@ namespace Canvastack\Origin\Controllers\Admin\System\Includes;
 
 use Canvastack\Origin\Models\Admin\System\Modules;
 use Canvastack\Origin\Models\Admin\System\Privilege;
+use Canvastack\Origin\Library\Constants\SafeHtml;
 
 /**
  * Created on Jan 19, 2018
@@ -304,7 +305,9 @@ trait Privileges {
 		
 		$opt                = ['align' => 'center', 'id' => strtolower($module_name) . '-row'];
 		$resultBox          = [];
-		$resultBox['head']  = [canvastack_table_row_attr($icon . $module_name, ['style' => $indent, 'id' => strtolower($module_name) . '-row'])];
+		// Concatenate icon with module name then mark as safe HTML
+		$headContent        = SafeHtml::unmark($icon) . $module_name;
+		$resultBox['head']  = [canvastack_table_row_attr(SafeHtml::mark($headContent), ['style' => $indent, 'id' => strtolower($module_name) . '-row'])];
 		$resultBox['admin'] = [
 			canvastack_table_row_attr($checkedAdmin['read'],   $opt),
 			canvastack_table_row_attr($checkedAdmin['write'],  $opt),
@@ -338,7 +341,7 @@ trait Privileges {
 	private function group_privilege() {
 		$rowData     = [];
 		$row_table   = [];
-		$icon        = '<i class="fa fa-caret-right"></i> &nbsp; ';
+		$icon        = SafeHtml::mark('<i class="fa fa-caret-right"></i> &nbsp; ');
 		$dataCenter  = [
 			$this->_center('Read'),
 			$this->_center('Insert'),
@@ -355,14 +358,18 @@ trait Privileges {
 		foreach ($this->menu_privileges as $parent => $childs) {
 			$parent_title	= ucwords(str_replace('_', ' ', $parent));
 			if (!empty($childs->name)) $parent_title = $childs->name;
-			$row_table[]	= [canvastack_table_row_attr($icon . $parent_title, ['style' => 'font-weight:500;text-indent:5pt;color:black', 'colspan' => 9])];
+			// Unmark icon, concatenate, then mark as safe HTML
+			$parentContent = SafeHtml::unmark($icon) . $parent_title;
+			$row_table[]	= [canvastack_table_row_attr(SafeHtml::mark($parentContent), ['style' => 'font-weight:500;text-indent:5pt;color:black', 'colspan' => 9])];
 			
 			foreach ($childs as $child_name => $data_module) {
 				if (isset($data_module->id) === false) {
 					$child_title	= ucwords(str_replace('_', ' ', $child_name));
 					if (!empty($data_module->name)) $child_title = $data_module->name;
 					
-					$row_table[]	= [canvastack_table_row_attr($icon . $child_title, ['style' => 'font-weight:500;text-indent:12pt;color:green', 'colspan' => 9])];
+					// Unmark icon, concatenate, then mark as safe HTML
+					$childContent = SafeHtml::unmark($icon) . $child_title;
+					$row_table[]	= [canvastack_table_row_attr(SafeHtml::mark($childContent), ['style' => 'font-weight:500;text-indent:12pt;color:green', 'colspan' => 9])];
 					foreach ($data_module as $module_name => $module_data) {
 						
 						if (!empty($module_data->id)) {
@@ -375,7 +382,9 @@ trait Privileges {
 							$module_title = ucwords(str_replace('_', ' ', $module_name));
 							if (!empty($module_data->name)) $module_title = $module_data->name;
 							
-							$row_table[] = [canvastack_table_row_attr($icon . $module_title, ['style' => 'font-weight:500;text-indent:19pt', 'colspan' => 9])];
+							// Unmark icon, concatenate, then mark as safe HTML
+							$moduleContent = SafeHtml::unmark($icon) . $module_title;
+							$row_table[] = [canvastack_table_row_attr(SafeHtml::mark($moduleContent), ['style' => 'font-weight:500;text-indent:19pt', 'colspan' => 9])];
 							foreach ($module_data as $third_name => $third_data) {
 								$third_title = ucwords(str_replace('_', ' ', $third_name));
 								if (!empty($third_data->name)) $third_title = $third_data->name;

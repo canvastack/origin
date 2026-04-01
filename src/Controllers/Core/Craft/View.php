@@ -67,33 +67,45 @@ trait View {
 		
 		$this->addScriptsFromElements();
 		
-		// RENDER DATATABLES
+		// ============================================================================
+		// RENDER DATATABLES - POST METHOD
+		// ============================================================================
+		// Check renderDataTables from query string (not POST body)
 		if (!empty($this->data['components']->table->method) && 'post' === strtolower($this->data['components']->table->method)) {
-			// RENDER DATATABLES WITH METHOD POST
-			$filter_datatables = [];
-			if (!empty($this->model_filters)) {
-				$filter_datatables = $this->model_filters;
-			}
-			
-			$method = [
-				'method' => 'post',
-				'renderDataTables' => true,
-				'difta' => ['name' => array_keys($this->data['components']->table->model)[0], 'source' => 'dynamics']
-			];
-			
-			$this->initRenderDatatables($method, $this->data['components']->table, $filter_datatables);
-			
-		} else {
-			if (!empty($_GET['renderDataTables']) && 'false' != $_GET['renderDataTables']) {
-				// RENDER DATATABLES WITH METHOD GET
+			// Check if this is actual POST ajax request
+			// renderDataTables is in query string, not POST body
+			if (request()->isMethod('POST') && request()->query('renderDataTables')) {
+				// Handle POST ajax request
 				$filter_datatables = [];
 				if (!empty($this->model_filters)) {
 					$filter_datatables = $this->model_filters;
 				}
 				
-				return $this->initRenderDatatables($_GET, $this->data['components']->table, $filter_datatables);
+				$method = [
+					'method' => 'post',
+					'renderDataTables' => true,
+					'difta' => request()->query('difta', ['name' => array_keys($this->data['components']->table->model)[0], 'source' => 'dynamics'])
+				];
+				
+				// RETURN response for ajax request
+				return $this->initRenderDatatables($method, $this->data['components']->table, $filter_datatables);
 			}
+			// If not ajax request, continue to normal page render
 		}
+		
+		// ============================================================================
+		// RENDER DATATABLES - GET METHOD
+		// ============================================================================
+		if (!empty($_GET['renderDataTables']) && 'false' != $_GET['renderDataTables']) {
+			// RENDER DATATABLES WITH METHOD GET
+			$filter_datatables = [];
+			if (!empty($this->model_filters)) {
+				$filter_datatables = $this->model_filters;
+			}
+			
+			return $this->initRenderDatatables($_GET, $this->data['components']->table, $filter_datatables);
+		}
+		
 		/* 
 		// RENDER CHARTS
 		if (!empty($this->data['components']->chart)) {
@@ -235,13 +247,18 @@ trait View {
 	
 	private function loginPage() {
 		$page = new Preference();
-		$obj  = $page->first()->getAttributes();
+		$record = $page->first();
 		$data = [];
 		
-		if (!empty($obj)) {
-			if (!empty($obj['logo']))             $data['login_page']['logo']       = $obj['logo'];
-			if (!empty($obj['login_title']))      $data['login_page']['title']      = $obj['login_title'];
-			if (!empty($obj['login_background'])) $data['login_page']['background'] = $obj['login_background'];
+		// Check if preference record exists before accessing attributes
+		if (!is_null($record)) {
+			$obj = $record->getAttributes();
+			
+			if (!empty($obj)) {
+				if (!empty($obj['logo']))             $data['login_page']['logo']       = $obj['logo'];
+				if (!empty($obj['login_title']))      $data['login_page']['title']      = $obj['login_title'];
+				if (!empty($obj['login_background'])) $data['login_page']['background'] = $obj['login_background'];
+			}
 		}
 		
 		return $data;
@@ -363,9 +380,9 @@ trait View {
 		$this->getPreferences();
 		
 		if (true === $thumb) {
-			return $this->preference['logo_thumb'];
+			return $this->preference['logo_thumb'] ?? '';
 		} else {
-			return $this->preference['logo'];
+			return $this->preference['logo'] ?? '';
 		}
 	}
 }

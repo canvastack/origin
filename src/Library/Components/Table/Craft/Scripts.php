@@ -220,7 +220,7 @@ trait Scripts {
 		}
 		
 		return $this->conditionalColumns(
-			"cody_{$varTableID}_dt", 
+			"CanvaStack_{$varTableID}_dt", 
 			$data_info['conditions']['columns'], 
 			$data_info['columns']
 		);
@@ -285,11 +285,11 @@ trait Scripts {
 		// Build filter button append (harus tanpa semicolon agar chaining bekerja)
 		$filterButton = '';
 		if (false !== $filters) {
-			$filterButton = "$('div#{$attr_id}_wrapper>.dt-buttons').append('<span class=\"cody_{$attr_id}_canvastack-dt-filter-box\"></span>')";
+			$filterButton = "$('div#{$attr_id}_wrapper>.dt-buttons').append('<span class=\"CanvaStack_{$attr_id}_canvastack-dt-filter-box\"></span>')";
 		}
 		
-		$js = "cody_{$varTableID}_dt = $('#{$attr_id}').DataTable({ {$responsive} {$defaultConfig} 'serverSide':true,{$ajax}{$columns}{$initComplete}{$jsConditional} }){$clickAction}{$filterButton}";
-		dd($js);
+		$js = "CanvaStack_{$varTableID}_dt = $('#{$attr_id}').DataTable({ {$responsive} {$defaultConfig} 'serverSide':true,{$ajax}{$columns}{$initComplete}{$jsConditional} }){$clickAction}{$filterButton}";
+		
 		return $js;
 	}
 	
@@ -343,7 +343,7 @@ trait Scripts {
 	 * @return string
 	 */
 	private function buildClientSideDataTable($attr_id, $varTableID, $columns, $defaultConfig) {
-		return "cody_{$varTableID}_dt = $('#{$attr_id}').DataTable({ {$defaultConfig}columns:{$columns} });";
+		return "CanvaStack_{$varTableID}_dt = $('#{$attr_id}').DataTable({ {$defaultConfig}columns:{$columns} });";
 	}
 	
 	/**
@@ -998,7 +998,7 @@ trait Scripts {
 		$safeId = addslashes($id);
 		$safeUrl = addslashes($url);
 		
-		return "canvastackDataTableFilters('{$safeId}', '{$safeUrl}', cody_{$varTableID}_dt);";
+		return "canvastackDataTableFilters('{$safeId}', '{$safeUrl}', CanvaStack_{$varTableID}_dt);";
 	}
 	
 	/**

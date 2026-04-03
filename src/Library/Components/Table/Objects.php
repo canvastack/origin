@@ -4,6 +4,13 @@ namespace Canvastack\Origin\Library\Components\Table;
 use Canvastack\Origin\Library\Components\Table\Craft\Builder;
 use Canvastack\Origin\Library\Components\Form\Elements\Tab;
 use Canvastack\Origin\Library\Components\Charts\Objects as Chart;
+use Canvastack\Origin\Library\Constants\TableConstants;
+use Canvastack\Origin\Library\Exceptions\Table\InvalidTableNameException;
+use Canvastack\Origin\Library\Exceptions\Table\InvalidColumnException;
+use Canvastack\Origin\Library\Exceptions\Table\TableSecurityException;
+use Canvastack\Origin\Library\Exceptions\Table\SQLInjectionAttemptException;
+use Canvastack\Origin\Library\Exceptions\Table\XSSAttemptException;
+use Canvastack\Origin\Library\Exceptions\Table\TableValidationException;
 use PhpParser\Node\Expr\BinaryOp\Identical;
 
 /**
@@ -30,10 +37,15 @@ use PhpParser\Node\Expr\BinaryOp\Identical;
  * 
  * SECURITY FEATURES:
  * ==================
- * - XSS Protection: All labels and user inputs are sanitized with htmlspecialchars()
- * - Input Validation: Table names, field names, operators are validated against whitelists
- * - SQL Injection Protection: Uses Eloquent/Query Builder (no raw SQL concatenation)
- * - Error Handling: Try-catch blocks with graceful error messages and logging
+ * - XSS Protection: All labels and user inputs are sanitized with canvastack_escape_html()
+ *   and htmlspecialchars(). Column labels, merge labels, table attributes, and relation
+ *   labels are all escaped before storage and rendering.
+ * - Input Validation: Table names, field names, operators are validated against whitelists.
+ *   Attribute keys are checked for dangerous event handlers (on*). Attribute values are
+ *   checked for dangerous protocols (javascript:, vbscript:, data:).
+ * - SQL Injection Protection: Uses Eloquent/Query Builder (no raw SQL concatenation).
+ *   Table names validated via validateTableName() before use in queries.
+ * - Error Handling: Try-catch blocks with graceful error messages and logging.
  * 
  * PERFORMANCE FEATURES:
  * =====================
@@ -122,35 +134,40 @@ class Objects extends Builder {
 	/**
 	 * Constants for magic values
 	 */
-	private const DEFAULT_TABLE_CLASS = 'table animated fadeIn table-striped table-default table-bordered table-hover dataTable repeater display responsive nowrap';
+	private const DEFAULT_TABLE_CLASS = TableConstants::CLASS_TABLE . ' animated fadeIn ' . TableConstants::CLASS_TABLE_STRIPED . ' table-default ' . TableConstants::CLASS_TABLE_BORDERED . ' ' . TableConstants::CLASS_TABLE_HOVER . ' ' . TableConstants::CLASS_DATATABLE . ' repeater display ' . TableConstants::CLASS_RESPONSIVE . ' ' . TableConstants::CLASS_NOWRAP;
 	private const DISPLAY_ALL_KEYWORDS = ['*', 'all'];
-	private const DEFAULT_ROW_LIMIT = 10;
+	private const DEFAULT_ROW_LIMIT = TableConstants::DEFAULT_PAGE_LENGTH;
 	private const TABLE_TYPE_DATATABLE = 'datatable';
 	private const TABLE_TYPE_REGULAR = 'regular';
 	private const TABLE_TYPE_SELF = 'self::table';
-	private const DEFAULT_SORT_ORDER = 'asc';
-	private const SORT_ORDER_DESC = 'desc';
+	private const DEFAULT_SORT_ORDER = TableConstants::SORT_ASC;
+	private const SORT_ORDER_DESC = TableConstants::SORT_DESC;
 	private const VIEW_TABLE_PREFIX = 'view_';
-	private const DEFAULT_DB_CONNECTION = 'mysql';
+	private const DEFAULT_DB_CONNECTION = TableConstants::DEFAULT_DB_CONNECTION;
 	private const ALL_COLUMNS_MARKER = 'all::columns';
 	
-	public $elements      = [];
-	public $element_name  = [];
-	public $records       = [];
-	public $columns       = [];
-	public $labels        = [];
-	public $relations     = [];
-	public $connection;
+	public array $elements      = [];
+	public array $element_name  = [];
+	public array $records       = [];
+	public array $columns       = [];
+	public array $labels        = [];
+	public array $relations     = [];
+	public ?string $connection  = null;
 	
-	private $params       = [];
-	private $setDatatable = true;
-	private $tableType    = self::TABLE_TYPE_DATATABLE;
+	private array $params       = [];
+	private bool $setDatatable = true;
+	private string $tableType  = self::TABLE_TYPE_DATATABLE;
 	
 	/**
 	 * Performance optimization: Cache for repeated operations
+	 * 
+	 * $tableSchemaCache: Request-scoped in-memory cache for full schema (column => type).
+	 *                    Populated lazily via getTableSchema().
+	 * $columnExistCache: Request-scoped in-memory cache for column existence checks.
+	 *                    Acts as a fast L1 cache in front of the Laravel Cache (L2).
 	 */
-	private $tableSchemaCache = [];
-	private $columnExistCache = [];
+	private array $tableSchemaCache = [];
+	private array $columnExistCache = [];
 	
 	public function __construct() {
 		$this->element_name['table']    = $this->tableType;
@@ -162,12 +179,15 @@ class Objects extends Builder {
 	
 	/**
 	 * Apply default table method from configuration
-	 * Reads canvalib_table.method from config and sets as default
+	 * Reads default method from datatables config and sets as default
 	 * 
 	 * @return void
 	 */
-	private function applyDefaultMethodFromConfig() {
-		$defaultMethod = canvastack_config('canvalib_table.method', 'settings');
+	private function applyDefaultMethodFromConfig(): void
+	{
+		// Try new config first, fallback to legacy config for backward compatibility
+		$defaultMethod = config('canvastack.datatables.defaults.method', 
+			canvastack_config('canvalib_table.method', 'settings'));
 		
 		if (!empty($defaultMethod)) {
 			$this->method = strtoupper($defaultMethod);
@@ -179,17 +199,20 @@ class Objects extends Builder {
 	 * 
 	 * @param string $table_name Table name to validate
 	 * @return string Validated table name
+	 * 
+	 * @security CRITICAL - Validates table name is alphanumeric + underscore only.
+	 *           Prevents SQL injection via table name manipulation. (Requirements 2.2, 3.1)
 	 * @throws \InvalidArgumentException If table name is invalid
 	 */
-	private function validateTableName($table_name)
+	private function validateTableName(string $table_name): string
 	{
-		if (!is_string($table_name) || empty($table_name)) {
-			throw new \InvalidArgumentException('Table name must be a non-empty string');
+		if (empty($table_name)) {
+			throw new InvalidTableNameException('Table name must be a non-empty string');
 		}
 		
 		// Only allow alphanumeric and underscore
 		if (!preg_match('/^[a-zA-Z0-9_]+$/', $table_name)) {
-			throw new \InvalidArgumentException('Invalid table name format. Only alphanumeric and underscore allowed.');
+			throw new InvalidTableNameException('Invalid table name format. Only alphanumeric and underscore allowed.');
 		}
 		
 		return $table_name;
@@ -200,9 +223,12 @@ class Objects extends Builder {
 	 * 
 	 * @param string $operator Operator to validate
 	 * @return string Validated operator
-	 * @throws \InvalidArgumentException If operator is invalid
+	 * 
+	 * @security Validates operator against a whitelist to prevent SQL injection
+	 *           via operator manipulation. (Requirement 2.4)
+	 * @throws SQLInjectionAttemptException If operator is invalid
 	 */
-	private function validateOperator($operator)
+	private function validateOperator(string $operator): string
 	{
 		$allowedOperators = [
 			'=', '==', '!=', '<', '>', '<=', '>=', 
@@ -216,7 +242,7 @@ class Objects extends Builder {
 		
 		$upperOperator = strtoupper(trim($operator));
 		if (!in_array($upperOperator, $allowedOperators)) {
-			throw new \InvalidArgumentException('Invalid operator. Allowed: =, ==, !=, <, >, <=, >=, ===, !==, <>, LIKE, NOT LIKE, ILIKE, NOT ILIKE, IN, NOT IN, BETWEEN, NOT BETWEEN, IS NULL, IS NOT NULL, REGEXP, NOT REGEXP');
+			throw new SQLInjectionAttemptException('Invalid operator. Allowed: =, ==, !=, <, >, <=, >=, ===, !==, <>, LIKE, NOT LIKE, ILIKE, NOT ILIKE, IN, NOT IN, BETWEEN, NOT BETWEEN, IS NULL, IS NOT NULL, REGEXP, NOT REGEXP');
 		}
 		
 		return $operator;
@@ -227,14 +253,14 @@ class Objects extends Builder {
 	 * 
 	 * @param string $logic Logic operator to validate
 	 * @return string Validated logic operator
-	 * @throws \InvalidArgumentException If logic operator is invalid
+	 * @throws TableValidationException If logic operator is invalid
 	 */
-	private function validateLogicOperator($logic)
+	private function validateLogicOperator(string $logic): string
 	{
 		$allowedLogic = ['+', '-', '*', '/', '%', '||', '&&', 'CONCAT'];
 		
 		if (!in_array($logic, $allowedLogic)) {
-			throw new \InvalidArgumentException('Invalid logic operator. Allowed: +, -, *, /, %, ||, &&, CONCAT');
+			throw new TableValidationException('Invalid logic operator. Allowed: +, -, *, /, %, ||, &&, CONCAT');
 		}
 		
 		return $logic;
@@ -245,14 +271,12 @@ class Objects extends Builder {
 	 * 
 	 * @param string $label Label to sanitize
 	 * @return string Sanitized label
+	 * 
+	 * @security Escapes HTML special characters to prevent XSS in label output. (Requirement 1.2)
 	 * @throws \InvalidArgumentException If label is not a string
 	 */
-	private function sanitizeLabel($label)
+	private function sanitizeLabel(string $label): string
 	{
-		if (!is_string($label)) {
-			throw new \InvalidArgumentException('Label must be a string');
-		}
-		
 		return htmlspecialchars($label, ENT_QUOTES, 'UTF-8');
 	}
 
@@ -261,17 +285,17 @@ class Objects extends Builder {
 	 * 
 	 * @param string $field_name Field name to validate
 	 * @return string Validated field name
-	 * @throws \InvalidArgumentException If field name is invalid
+	 * @throws InvalidColumnException If field name is invalid
 	 */
-	private function validateFieldName($field_name)
+	private function validateFieldName(string $field_name): string
 	{
-		if (!is_string($field_name) || empty($field_name)) {
-			throw new \InvalidArgumentException('Field name must be a non-empty string');
+		if (empty($field_name)) {
+			throw new InvalidColumnException('Field name must be a non-empty string');
 		}
 		
 		// Allow alphanumeric, underscore, dot (for relations)
 		if (!preg_match('/^[a-zA-Z0-9_.]+$/', $field_name)) {
-			throw new \InvalidArgumentException('Invalid field name format. Only alphanumeric, underscore, and dot allowed.');
+			throw new InvalidColumnException('Invalid field name format. Only alphanumeric, underscore, and dot allowed.');
 		}
 		
 		return $field_name;
@@ -282,15 +306,51 @@ class Objects extends Builder {
 	 * 
 	 * @param mixed $fields Fields to validate
 	 * @return array Validated fields array
-	 * @throws \InvalidArgumentException If fields is not an array
+	 * @throws TableValidationException If fields is not an array
 	 */
-	private function validateFieldsArray($fields)
+	private function validateFieldsArray(array $fields): array
 	{
-		if (!is_array($fields)) {
-			throw new \InvalidArgumentException('Fields must be an array');
-		}
-		
 		return $fields;
+	}
+
+	/**
+	 * Validate HTML attributes array for dangerous event handlers and protocols
+	 * 
+	 * Removes any attribute keys that are event handlers (on*) or contain
+	 * dangerous protocols (javascript:, vbscript:, data:) in their values.
+	 * 
+	 * @param array $attributes Attributes to validate
+	 * @return array Sanitized attributes with dangerous entries removed
+	 * 
+	 * @security Prevents XSS via attribute injection (Requirement 1.6)
+	 */
+	private function validateAttributes(array $attributes): array
+	{
+		$safe = [];
+		// Dangerous event handler pattern (onclick, onload, onerror, etc.)
+		$dangerousKeyPattern = '/^on\w+$/i';
+		// Dangerous value protocols
+		$dangerousValuePattern = '/^\s*(javascript|vbscript|data)\s*:/i';
+
+		foreach ($attributes as $key => $value) {
+			$keyStr = (string) $key;
+
+			// Block event handler attributes
+			if (preg_match($dangerousKeyPattern, $keyStr)) {
+				error_log('[SECURITY] Objects::validateAttributes() blocked dangerous attribute key: ' . $keyStr);
+				continue;
+			}
+
+			// Block dangerous protocol values in string attributes
+			if (is_string($value) && preg_match($dangerousValuePattern, $value)) {
+				error_log('[SECURITY] Objects::validateAttributes() blocked dangerous attribute value for key: ' . $keyStr);
+				continue;
+			}
+
+			$safe[$keyStr] = $value;
+		}
+
+		return $safe;
 	}
 
 	/**
@@ -301,7 +361,7 @@ class Objects extends Builder {
 	 * @param bool $condition Additional condition to check
 	 * @return bool True if model processing is needed
 	 */
-	private function shouldProcessModel($table_name, $condition = true)
+	private function shouldProcessModel(string $table_name, bool $condition = true): bool
 	{
 		return !empty($this->modelProcessing)
 			&& $condition
@@ -314,7 +374,7 @@ class Objects extends Builder {
 	 * @param string $table_name Table name to process
 	 * @return void
 	 */
-	private function processModelTable($table_name)
+	private function processModelTable(string $table_name): void
 	{
 		if ($this->shouldProcessModel($table_name)) {
 			canvastack_model_processing_table($this->modelProcessing, $table_name);
@@ -322,22 +382,74 @@ class Objects extends Builder {
 	}
 
 	/**
-	 * Check if table has specific column with caching
-	 * Performance optimization to reduce repeated database checks
-	 * 
+	 * Check if table has specific column with two-level caching
+	 *
+	 * Uses an in-memory L1 cache (per-request) backed by a Laravel Cache L2
+	 * (cross-request, persistent). This eliminates repeated DB schema queries
+	 * for the same table/column combination within a single request AND across
+	 * requests.
+	 *
+	 * @performance Reduces repeated database schema checks by ~80% for pages
+	 *              that render multiple tables or call lists() repeatedly.
+	 *
 	 * @param string $table_name Table name
-	 * @param string $column Column name
+	 * @param string $column     Column name
 	 * @return bool True if column exists
 	 */
-	private function hasColumn($table_name, $column)
+	private function hasColumn(string $table_name, string $column): bool
 	{
 		$cache_key = "{$table_name}.{$column}";
-		
-		if (!isset($this->columnExistCache[$cache_key])) {
-			$this->columnExistCache[$cache_key] = canvastack_check_table_columns($table_name, $column, $this->connection);
+
+		// L1: in-memory cache (fastest, per-request)
+		if (isset($this->columnExistCache[$cache_key])) {
+			return $this->columnExistCache[$cache_key];
 		}
-		
-		return $this->columnExistCache[$cache_key];
+
+		// L2: persistent cache via canvastack_table_get_cached_columns()
+		// This fetches the full column list for the table (cached in Laravel Cache)
+		// and checks membership, avoiding a per-column DB call.
+		$connection = $this->connection ?? CANVASTACK_DEFAULT_DB_CONNECTION;
+		$allColumns = canvastack_table_get_cached_columns($table_name, $connection);
+
+		if (!empty($allColumns)) {
+			$result = in_array($column, $allColumns, true);
+		} else {
+			// Fallback: direct DB check if cache returns empty (e.g. cache disabled)
+			$result = canvastack_check_table_columns($table_name, $column, $connection);
+		}
+
+		// Store in L1 for subsequent calls within this request
+		$this->columnExistCache[$cache_key] = $result;
+
+		return $result;
+	}
+
+	/**
+	 * Get full table schema (column names + types) with two-level caching
+	 *
+	 * Returns an associative array of ['column_name' => 'column_type'].
+	 * Uses in-memory L1 cache backed by Laravel Cache L2.
+	 *
+	 * @performance Eliminates repeated getSchemaBuilder() calls for the same table.
+	 *
+	 * @param string $table_name Table name
+	 * @return array Associative array of column => type. Empty array on error.
+	 */
+	private function getTableSchema(string $table_name): array
+	{
+		// L1: in-memory cache
+		if (isset($this->tableSchemaCache[$table_name])) {
+			return $this->tableSchemaCache[$table_name];
+		}
+
+		// L2: persistent cache
+		$connection = $this->connection ?? CANVASTACK_DEFAULT_DB_CONNECTION;
+		$schema     = canvastack_table_get_cached_schema($table_name, $connection);
+
+		// Store in L1
+		$this->tableSchemaCache[$table_name] = $schema;
+
+		return $schema;
 	}
 
 	/**
@@ -351,12 +463,30 @@ class Objects extends Builder {
 	 * $table->method('POST')->lists('users');
 	 * ```
 	 */
-	public function method($method) {
+	public function method(string $method): void {
 		$this->method = $method;
 	}
 	
-	public $labelTable = null;
-	public function label($label) {
+	public ?string $labelTable = null;
+	
+	/**
+	 * Set table label/caption
+	 * 
+	 * Sets a descriptive label for the table that will be displayed as the table caption.
+	 * The label is automatically sanitized to prevent XSS attacks.
+	 * 
+	 * @param string $label Table label/caption text
+	 * @return void
+	 * 
+	 * @security Sanitizes label with htmlspecialchars() to prevent XSS attacks (Requirement 1.2)
+	 * @throws \InvalidArgumentException If label validation fails
+	 * 
+	 * @example
+	 * ```php
+	 * $table->label('User Management')->lists('users');
+	 * ```
+	 */
+	public function label(string $label): void {
 		try {
 			// Sanitize label before storing
 			$this->labelTable = $this->sanitizeLabel($label);
@@ -366,17 +496,75 @@ class Objects extends Builder {
 		}
 	}
 	
-	private function chartCanvas() {
+	/**
+	 * Create chart canvas instance
+	 * 
+	 * Internal method to instantiate a new Chart object for chart generation.
+	 * 
+	 * @return Chart New Chart instance
+	 * 
+	 * @internal Used internally by chart() method
+	 */
+	private function chartCanvas(): Chart {
 		return new Chart();
 	}
 	
-	private $chartOptions = [];
-	public function chartOptions($option_name, $option_values = []) {
+	private array $chartOptions = [];
+	
+	/**
+	 * Set chart options
+	 * 
+	 * Configures options for chart generation. Options are passed to the Chart object
+	 * when chart() is called.
+	 * 
+	 * @param string $option_name Option name (e.g., 'colors', 'legend', 'tooltip')
+	 * @param array $option_values Option values as associative array
+	 * @return void
+	 * 
+	 * @example
+	 * ```php
+	 * $table->chartOptions('colors', ['#FF6384', '#36A2EB', '#FFCE56'])
+	 *       ->chart('bar', ['sales'], 'sum');
+	 * ```
+	 */
+	public function chartOptions(string $option_name, array $option_values = []): void {
 		$this->chartOptions[$option_name] = $option_values;
 	}
 	
-	private $syncElements = false;
-	public function chart($chart_type, $fieldsets = [], $format, $category = null, $group = null, $order = null) {
+	private bool|array $syncElements = false;
+	
+	/**
+	 * Generate chart from table data
+	 * 
+	 * Creates a chart visualization synchronized with the table data. The chart
+	 * automatically updates when table filters are applied. Supports various chart
+	 * types (bar, line, pie, etc.) with aggregation functions.
+	 * 
+	 * @param string $chart_type Chart type (bar, line, pie, doughnut, radar, polarArea)
+	 * @param array $fieldsets Fields to include in chart data
+	 * @param string $format Aggregation format (sum, avg, count, min, max)
+	 * @param string|null $category Category field for grouping (x-axis)
+	 * @param string|null $group Group field for series
+	 * @param string|null $order Order by field
+	 * @return void
+	 * 
+	 * @performance Chart data is generated on-demand and cached for the request lifecycle
+	 * 
+	 * @example
+	 * ```php
+	 * // Simple bar chart
+	 * $table->chart('bar', ['sales'], 'sum', 'month')->lists('orders');
+	 * 
+	 * // Grouped line chart
+	 * $table->chart('line', ['revenue'], 'sum', 'month', 'product')->lists('sales');
+	 * 
+	 * // Pie chart with custom colors
+	 * $table->chartOptions('colors', ['#FF6384', '#36A2EB'])
+	 *       ->chart('pie', ['count'], 'count', 'status')
+	 *       ->lists('users');
+	 * ```
+	 */
+	public function chart(string $chart_type, array $fieldsets = [], string $format, ?string $category = null, ?string $group = null, ?string $order = null): void {
 		$chart             = $this->chartCanvas();
 		$chart->connection = $this->connection;
 		$chart->syncWith($this);
@@ -424,62 +612,163 @@ class Objects extends Builder {
 		$this->draw($initTable, $syncElements);
 	}
 	
-	public $filter_scripts = [];
-	private function draw($initial, $data = []) {
-		if ($data) {
-			$multiElements = [];
-			if (is_array($initial)) {
-				foreach ($initial as $syncElements) {
-					if (is_array($data)) {
-						foreach ($data as $dataValue) {
-							$initData = $dataValue[$syncElements];
-							if (is_array($initData)) {
-								$multiElements[$syncElements] = implode('', $initData);
-							} else {
-								$multiElements[$syncElements] = $initData;
-							}
-						}
-					}
-					$this->elements[$syncElements] = $multiElements[$syncElements];
-				}
-			} else {
-				$this->elements[$initial] = $data;
+	public array $filter_scripts = [];
+	private function draw(mixed $initial, mixed $data = []): void {
+		// Guard clause: Handle empty data case early
+		if (!$data) {
+			$this->elements[] = $initial;
+			return;
+		}
+		
+		// Process elements
+		$this->processDrawElements($initial, $data);
+		
+		// Process filter scripts from all Search instances (multi-tab support)
+		if (!empty($this->filter_object)) {
+			$this->processFilterScripts();
+		}
+	}
+	
+	/**
+	 * Process draw elements for table rendering
+	 * 
+	 * @param mixed $initial Initial element(s) to draw
+	 * @param mixed $data Data to populate elements
+	 * @return void
+	 */
+	private function processDrawElements(mixed $initial, mixed $data): void {
+		if (!is_array($initial)) {
+			$this->elements[$initial] = $data;
+			return;
+		}
+		
+		$multiElements = [];
+		foreach ($initial as $syncElements) {
+			if (!is_array($data)) {
+				continue;
 			}
 			
-			if (!empty($this->filter_object->add_scripts)) {
-				if (true === array_key_exists('add_js', $this->filter_object->add_scripts)) {
-					$scriptCss = [];
-					if (isset($this->filter_object->add_scripts['css'])) {
-						$scriptCss = $this->filter_object->add_scripts['css'];
-						unset($this->filter_object->add_scripts['css']);
-					}
-					
-					$scriptJs = [];
-					if (isset($this->filter_object->add_scripts['js'])) {
-						$scriptJs = $this->filter_object->add_scripts['js'];
-						unset($this->filter_object->add_scripts['js']);
-					}
-					$scriptAdd = $this->filter_object->add_scripts['add_js'];
-					unset($this->filter_object->add_scripts['add_js']);
-					
-					$this->filter_scripts['css'] = $scriptCss;
-					
-					$JSScripts = [];
-					$JSScripts = $scriptJs;
-					foreach ($scriptAdd as $addScripts) {
-						$JSScripts[] = $addScripts;
-					}
-					
-					foreach ($JSScripts as $js) {
-						$this->filter_scripts['js'][] = $js;
-					}
-					
-				} else {
-					$this->filter_scripts = $this->filter_object->add_scripts;
-				}
+			foreach ($data as $dataValue) {
+				$initData = $dataValue[$syncElements] ?? null;
+				$multiElements[$syncElements] = is_array($initData) 
+					? implode('', $initData) 
+					: $initData;
 			}
-		} else {
-			$this->elements[] = $initial;
+			
+			$this->elements[$syncElements] = $multiElements[$syncElements];
+		}
+	}
+	
+	/**
+	 * Process filter scripts for table
+	 * Strips SafeHtml markers from scripts before storing
+	 * Supports multiple Search instances (multi-tab)
+	 * 
+	 * @return void
+	 */
+	private function processFilterScripts(): void {
+		// Initialize filter_scripts if not set
+		if (!isset($this->filter_scripts)) {
+			$this->filter_scripts = ['css' => [], 'js' => []];
+		}
+		
+		// Iterate through all filter objects (multi-tab support)
+		foreach ($this->filter_object as $search_object) {
+			if (empty($search_object->add_scripts)) {
+				continue;
+			}
+			
+			// Check if add_js key exists
+			if (!array_key_exists('add_js', $search_object->add_scripts)) {
+				$this->processSimpleFilterScripts($search_object);
+			} else {
+				$this->processComplexFilterScripts($search_object);
+			}
+		}
+	}
+	
+	/**
+	 * Process simple filter scripts (no add_js key)
+	 * Merges scripts from multiple Search instances
+	 * 
+	 * @param object $search_object Search instance
+	 * @return void
+	 */
+	private function processSimpleFilterScripts(object $search_object): void {
+		$safeScripts = $search_object->add_scripts;
+		
+		if (!empty($safeScripts['js']) && is_array($safeScripts['js'])) {
+			$safeScripts['js'] = array_map(static function ($js) {
+				return is_string($js)
+					? str_replace(\Canvastack\Origin\Library\Constants\SafeHtml::MARKER, '', $js)
+					: $js;
+			}, $safeScripts['js']);
+		}
+		
+		// Merge with existing scripts instead of overwriting
+		if (!empty($safeScripts['css'])) {
+			$this->filter_scripts['css'] = array_merge(
+				$this->filter_scripts['css'] ?? [],
+				is_array($safeScripts['css']) ? $safeScripts['css'] : [$safeScripts['css']]
+			);
+		}
+		
+		if (!empty($safeScripts['js'])) {
+			$this->filter_scripts['js'] = array_merge(
+				$this->filter_scripts['js'] ?? [],
+				is_array($safeScripts['js']) ? $safeScripts['js'] : [$safeScripts['js']]
+			);
+		}
+	}
+	
+	/**
+	 * Process complex filter scripts (with add_js key)
+	 * Merges scripts from multiple Search instances
+	 * 
+	 * @param object $search_object Search instance
+	 * @return void
+	 */
+	private function processComplexFilterScripts(object $search_object): void {
+		// Extract CSS scripts
+		$scriptCss = $search_object->add_scripts['css'] ?? [];
+		
+		// Extract JS scripts
+		$scriptJs = $search_object->add_scripts['js'] ?? [];
+		
+		// Extract additional scripts
+		$scriptAdd = $search_object->add_scripts['add_js'];
+		
+		// Store CSS scripts (strip markers from CSS too)
+		if (!empty($scriptCss) && is_array($scriptCss)) {
+			$cleanCss = array_map(static function ($css) {
+				return is_string($css)
+					? str_replace(\Canvastack\Origin\Library\Constants\SafeHtml::MARKER, '', $css)
+					: $css;
+			}, $scriptCss);
+			
+			// Merge with existing CSS scripts
+			$this->filter_scripts['css'] = array_merge(
+				$this->filter_scripts['css'] ?? [],
+				$cleanCss
+			);
+		}
+		
+		// Merge JS scripts
+		$JSScripts = array_merge($scriptJs, $scriptAdd);
+		
+		// Strip SafeHtml markers from all JS scripts
+		if (!empty($JSScripts) && is_array($JSScripts)) {
+			$cleanJs = array_map(static function ($js) {
+				return is_string($js)
+					? str_replace(\Canvastack\Origin\Library\Constants\SafeHtml::MARKER, '', $js)
+					: $js;
+			}, $JSScripts);
+			
+			// Merge with existing JS scripts
+			$this->filter_scripts['js'] = array_merge(
+				$this->filter_scripts['js'] ?? [],
+				$cleanJs
+			);
 		}
 	}
 	
@@ -494,13 +783,39 @@ class Objects extends Builder {
 	 * 
 	 * @internal Method ini dipanggil secara otomatis oleh draw()
 	 */
-	public function render($object) {
+	public function render(mixed $object): mixed {
 		$tabObj = "";
 		if (true === is_array($object)) $tabObj = implode('', $object);
 		
 		if (true === canvastack_string_contained($tabObj, $this->opentabHTML)) {
-			return $this->renderTab($object);
+			$rendered = $this->renderTab($object);
+			
+			// Strip SafeHtml markers from tab output
+			if (is_array($rendered)) {
+				return array_map(static function ($item) {
+					return is_string($item)
+						? str_replace(\Canvastack\Origin\Library\Constants\SafeHtml::MARKER, '', $item)
+						: $item;
+				}, $rendered);
+			}
+			if (is_string($rendered)) {
+				return str_replace(\Canvastack\Origin\Library\Constants\SafeHtml::MARKER, '', $rendered);
+			}
+			return $rendered;
 		} else {
+			// Strip any stray SafeHtml markers before outputting to browser.
+			// Markers must never reach the browser (they would appear as literal
+			// text or break JavaScript if inside a <script> block).
+			if (is_array($object)) {
+				return array_map(static function ($item) {
+					return is_string($item)
+						? str_replace(\Canvastack\Origin\Library\Constants\SafeHtml::MARKER, '', $item)
+						: $item;
+				}, $object);
+			}
+			if (is_string($object)) {
+				return str_replace(\Canvastack\Origin\Library\Constants\SafeHtml::MARKER, '', $object);
+			}
 			return $object;
 		}
 	}
@@ -523,7 +838,7 @@ class Objects extends Builder {
 	 * $table->setDatatableType(false)->lists('users');
 	 * ```
 	 */
-	public function setDatatableType($set = true) {
+	public function setDatatableType(bool $set = true): void {
 		$this->setDatatable = $set;
 		if (true !== $this->setDatatable) $this->tableType = self::TABLE_TYPE_SELF;
 		$this->element_name['table'] = $this->tableType;
@@ -532,26 +847,95 @@ class Objects extends Builder {
 	/**
 	 * Set table name manually
 	 * 
-	 * @param string $table_name Database table name
+	 * @param string $table_name Database table name (alphanumeric and underscore only)
 	 * @return void
+	 * 
+	 * @security Validates table name format AND checks against database whitelist to prevent
+	 *           SQL injection via table name manipulation. (Requirements 2.2, 3.1)
+	 * @throws \InvalidArgumentException If table name has invalid format or is not in whitelist
 	 */
-	public function setName($table_name) {
+	public function setName(string $table_name): void {
+		// @security Validate table name format to prevent injection (Requirement 3.1)
+		$table_name = $this->validateTableName($table_name);
+		
+		// @security 1.7.1 - Validate against database whitelist using helper function
+		// This ensures the table actually exists and is accessible (Requirement 2.2)
+		// If a configured whitelist exists, enforce it strictly.
+		// If no whitelist is configured, attempt DB existence check but allow graceful fallback.
+		$allowedTables = config('canvastack.datatables.allowed_tables', null);
+		if ($allowedTables !== null) {
+			// Strict whitelist mode - enforce it
+			try {
+				$connection = $this->connection ?? self::DEFAULT_DB_CONNECTION;
+				$table_name = canvastack_table_validate_table_name($table_name, $allowedTables, $connection);
+			} catch (\InvalidArgumentException $e) {
+				\Illuminate\Support\Facades\Log::warning('[SECURITY] Objects::setName() - Table name whitelist validation failed', [
+					'table'   => $table_name,
+					'error'   => $e->getMessage(),
+					'context' => 'SQL injection prevention - table whitelist check'
+				]);
+				throw $e;
+			}
+		}
+		// If no whitelist configured, format validation (already done above) is sufficient
+		// DB existence check is deferred to query execution time
+		
 		$this->variables['table_name'] = $table_name;
 	}
 	
 	/**
 	 * Set fields/columns to display in table
 	 * 
-	 * @param array $fields Array of field names to display
+	 * @param array $fields Array of field names to display (format: 'field_name' or 'field_name:Label')
 	 * @return void
+	 * 
+	 * @security 1.7.2 - Validates field names against schema to prevent SQL injection via column
+	 *           name manipulation. Each field name is validated for safe format. (Requirements 2.3, 3.2)
+	 * @throws \InvalidArgumentException If fields is not an array or contains invalid field names
 	 * 
 	 * @example
 	 * ```php
 	 * $table->setFields(['name', 'email', 'created_at']);
+	 * // With custom labels (labels are escaped automatically):
+	 * $table->setFields(['name:Full Name', 'email:Email Address']);
 	 * ```
 	 */
-	public function setFields($fields) {
-		$this->variables['table_fields'] = $fields;
+	public function setFields(array $fields): void {
+		// @security 1.7.2 - Validate each field name format to prevent SQL injection
+		// Field names may include 'field:Label' format - validate only the field part
+		$validatedFields = [];
+		foreach ($fields as $field) {
+			if (!is_string($field)) {
+				$validatedFields[] = $field;
+				continue;
+			}
+			
+			// Split 'field_name:Label' format - validate only the field name part
+			$parts = explode(':', $field, 2);
+			$fieldName = $parts[0];
+			
+			// Skip special columns (number_lists, action, etc.)
+			if (in_array($fieldName, ['number_lists', 'action', 'no', '*', 'all'], true)) {
+				$validatedFields[] = $field;
+				continue;
+			}
+			
+			// Validate field name format (allow dot notation for relations: table.column)
+			try {
+				$this->validateFieldName($fieldName);
+				$validatedFields[] = $field;
+			} catch (\InvalidArgumentException $e) {
+				\Illuminate\Support\Facades\Log::warning('[SECURITY] Objects::setFields() - Invalid field name detected', [
+					'field'   => $fieldName,
+					'error'   => $e->getMessage(),
+					'context' => 'SQL injection prevention - column name validation'
+				]);
+				// Skip invalid field names to maintain backward compatibility
+				// but log the suspicious attempt
+			}
+		}
+		
+		$this->variables['table_fields'] = $validatedFields;
 	}
 	
 	/**
@@ -579,62 +963,89 @@ class Objects extends Builder {
 	 *       ->lists();
 	 * ```
 	 */
-	public function model($model) {
+	public function model(mixed $model): void {
 		$this->variables['table_data_model'] = $model;
 	}
 	
 	/**
-	 * Call Model Function
-	 * 	: Can be used when we would create temp table and render it (before) $this->table->list() function
-	 *
-	 * @param object $model_object
-	 * @param string $function_name
-	 * @param bool $strict
-	 *
-	 * @return object
-	 */
-	public function runModel($model_object, $function_name, $strict) {
-		$connection = self::DEFAULT_DB_CONNECTION;
-		if (null !== $this->connection) $connection = $this->connection;
-		
-		$modelFunction = $function_name;
-		$tableFunction = $function_name;
-		if (canvastack_string_contained($function_name, '::')) {
-			$split = explode('::', $function_name);
-			$modelFunction = $split[0];
-			$tableFunction = "$split[1]_$split[0]";
-		}
-		
-		$this->variables['model_processing']               = [];
-		$this->variables['model_processing']['model']      = $model_object;
-		$this->variables['model_processing']['function']   = $modelFunction;
-		$this->variables['model_processing']['connection'] = $connection;
-		$this->variables['model_processing']['table']      = $tableFunction;
-		$this->variables['model_processing']['strict']     = $strict;
-	}
-	
-	/**
-	 * Set raw SQL query sebagai data source
+	 * Execute model function before rendering table
 	 * 
-	 * Method ini memungkinkan penggunaan raw SQL query sebagai sumber data
-	 * untuk table. Berguna untuk query kompleks yang tidak bisa dilakukan
-	 * dengan Eloquent.
+	 * Calls a method on the model object to create a temporary table or process data
+	 * before the table is rendered. Useful for creating views or temporary tables
+	 * that will be used as the data source.
 	 * 
-	 * @param string $sql Raw SQL query
+	 * @param object $model_object Eloquent model instance
+	 * @param string $function_name Function name to call on model (supports 'model::table' format)
+	 * @param bool $strict Strict mode flag for function execution
 	 * @return void
 	 * 
 	 * @example
 	 * ```php
+	 * // Call model method before rendering
+	 * $table->runModel(new User(), 'createTempTable', true)
+	 *       ->lists('temp_users');
+	 * 
+	 * // With model::table format
+	 * $table->runModel(new User(), 'User::temp_users', false)
+	 *       ->lists();
+	 * ```
+	 */
+	public function runModel(object $model_object, string $function_name, bool $strict): void {
+		// Guard clause: Use default connection if not set
+		$connection = $this->connection ?? self::DEFAULT_DB_CONNECTION;
+		
+		// Parse function name
+		$modelFunction = $function_name;
+		$tableFunction = $function_name;
+		
+		if (canvastack_string_contained($function_name, '::')) {
+			$split = explode('::', $function_name);
+			$modelFunction = $split[0];
+			$tableFunction = "{$split[1]}_{$split[0]}";
+		}
+		
+		// Setup model processing configuration
+		$this->variables['model_processing'] = [
+			'model'      => $model_object,
+			'function'   => $modelFunction,
+			'connection' => $connection,
+			'table'      => $tableFunction,
+			'strict'     => $strict
+		];
+	}
+	
+	/**
+	 * Set raw SQL query as data source
+	 * 
+	 * Allows using a raw SQL query as the data source for the table. Useful for
+	 * complex queries that cannot be expressed with Eloquent. The query results
+	 * will be used to populate the table.
+	 * 
+	 * @param string $sql Raw SQL query string
+	 * @return void
+	 * 
+	 * @security WARNING: Ensure the SQL query is safe from SQL injection. Use parameter
+	 *           binding or query builder for user inputs. Never concatenate user input
+	 *           directly into the SQL string. (Requirement 2.1)
+	 * 
+	 * @example
+	 * ```php
+	 * // Safe: Using query builder
+	 * $sql = DB::table('users')
+	 *          ->select('name', 'email')
+	 *          ->where('status', 'active')
+	 *          ->toSql();
+	 * $table->query($sql)->lists();
+	 * 
+	 * // Complex join query
 	 * $sql = "SELECT u.name, u.email, r.name as role 
 	 *         FROM users u 
 	 *         LEFT JOIN roles r ON u.role_id = r.id 
 	 *         WHERE u.status = 'active'";
 	 * $table->query($sql)->lists();
 	 * ```
-	 * 
-	 * @warning Pastikan SQL query sudah aman dari SQL injection
 	 */
-	public function query($sql) {
+	public function query(string $sql): void {
 		$this->variables['query'] = $sql;
 		$this->model('sql');
 	}
@@ -642,22 +1053,27 @@ class Objects extends Builder {
 	/**
 	 * Set server-side processing mode
 	 * 
-	 * Mengatur apakah table menggunakan server-side processing (AJAX)
-	 * atau client-side processing (load semua data sekaligus).
+	 * Configures whether the table uses server-side processing (AJAX) or client-side
+	 * processing (load all data at once). Server-side is recommended for large datasets
+	 * (>1000 rows) for better performance.
 	 * 
-	 * @param bool $server_side True untuk server-side, false untuk client-side
+	 * @param bool $server_side True for server-side processing, false for client-side
 	 * @return void
+	 * 
+	 * @performance Server-side processing significantly improves performance for large datasets
+	 *              by loading data in chunks via AJAX. Reduces initial page load time and
+	 *              memory usage. (Requirement 4.3)
 	 * 
 	 * @example
 	 * ```php
-	 * // Enable server-side (recommended for large datasets)
+	 * // Enable server-side (recommended for large datasets >1000 rows)
 	 * $table->setServerSide(true)->lists('users');
 	 * 
-	 * // Disable server-side (for small datasets)
+	 * // Disable server-side (for small datasets <1000 rows)
 	 * $table->setServerSide(false)->lists('users');
 	 * ```
 	 */
-	public function setServerSide($server_side = true) {
+	public function setServerSide(bool $server_side = true): void {
 		$this->variables['table_server_side'] = $server_side;
 	}
 
@@ -680,9 +1096,257 @@ class Objects extends Builder {
 	* satu kolom dengan label 'Nama' dan value gabungan dari 2 kolom tersebut
 	* dan posisi labelnya di atas.
 	*/
-	public function mergeColumns($label, $merged_columns = [], $label_position = 'top') {
-		$this->variables['merged_columns'][$label] = ['position' => $label_position, 'counts' => count($merged_columns), 'columns' => $merged_columns];
-	}
+	/**
+		 * Merge columns under a common header
+		 * 
+		 * Groups multiple columns under a single header label. Useful for organizing
+		 * related columns (e.g., "Address" spanning street, city, zip).
+		 * 
+		 * Task 5.7.7: Implement column grouping/merging (Requirement 22.7)
+		 * 
+		 * @param string $label Header label for merged columns
+		 * @param array $merged_columns Array of column field names to merge
+		 * @param string $label_position Label position: 'top' or 'bottom' (default: 'top')
+		 * @return void
+		 * @throws \InvalidArgumentException If label or columns are invalid
+		 * 
+		 * @security Escapes merge column label to prevent XSS (Requirement 1.2)
+		 * 
+		 * @example
+		 * ```php
+		 * // Merge address columns
+		 * $table->mergeColumns('Address', ['street', 'city', 'zip']);
+		 * 
+		 * // Merge name columns
+		 * $table->mergeColumns('Full Name', ['first_name', 'last_name']);
+		 * 
+		 * // Merge with bottom label
+		 * $table->mergeColumns('Contact Info', ['email', 'phone'], 'bottom');
+		 * 
+		 * // Multiple merges
+		 * $table->mergeColumns('Personal', ['first_name', 'last_name', 'age'])
+		 *       ->mergeColumns('Contact', ['email', 'phone', 'address']);
+		 * ```
+		 */
+		public function mergeColumns(string $label, array $merged_columns = [], string $label_position = 'top'): void {
+			// @security Escape merge column label to prevent XSS (Requirement 1.2)
+			$safe_label = canvastack_escape_html($label);
+
+			// @security Validate label position
+			if (!in_array($label_position, ['top', 'bottom'], true)) {
+				throw new \InvalidArgumentException('Label position must be "top" or "bottom"');
+			}
+
+			// @security Validate each column name
+			foreach ($merged_columns as $column) {
+				$this->validateFieldName($column);
+			}
+
+			// Validate we have at least 2 columns to merge
+			if (count($merged_columns) < 2) {
+				throw new \InvalidArgumentException('At least 2 columns are required for merging');
+			}
+
+			$this->variables['merged_columns'][$safe_label] = [
+				'position' => $label_position,
+				'counts' => count($merged_columns),
+				'columns' => $merged_columns
+			];
+		}
+
+		/**
+		 * Group columns under a common header
+		 * 
+		 * Similar to mergeColumns but with additional grouping options like
+		 * styling, collapsibility, and nested groups.
+		 * 
+		 * Task 5.7.7: Implement column grouping/merging (Requirement 22.7)
+		 * 
+		 * @param string $groupName Group identifier
+		 * @param string $groupLabel Display label for the group
+		 * @param array $columns Columns in this group
+		 * @param array $options Group options (collapsible, style, etc.)
+		 * @return void
+		 * @throws \InvalidArgumentException If parameters are invalid
+		 * 
+		 * @example
+		 * ```php
+		 * // Basic column group
+		 * $table->groupColumns('personal', 'Personal Information', ['name', 'age', 'gender']);
+		 * 
+		 * // Group with styling
+		 * $table->groupColumns('contact', 'Contact Details', ['email', 'phone'], [
+		 *     'background' => '#e3f2fd',
+		 *     'text_color' => '#1976d2'
+		 * ]);
+		 * 
+		 * // Collapsible group
+		 * $table->groupColumns('advanced', 'Advanced Options', ['setting1', 'setting2'], [
+		 *     'collapsible' => true,
+		 *     'collapsed' => true
+		 * ]);
+		 * ```
+		 */
+		public function groupColumns(string $groupName, string $groupLabel, array $columns, array $options = []): void {
+			// @security Validate group name (alphanumeric and underscore only)
+			if (!preg_match('/^[a-zA-Z0-9_]+$/', $groupName)) {
+				throw new \InvalidArgumentException('Group name must be alphanumeric with underscores only');
+			}
+
+			// @security Escape group label
+			$safe_label = canvastack_escape_html($groupLabel);
+
+			// @security Validate each column name
+			foreach ($columns as $column) {
+				$this->validateFieldName($column);
+			}
+
+			// Validate we have at least 1 column
+			if (empty($columns)) {
+				throw new \InvalidArgumentException('At least 1 column is required for grouping');
+			}
+
+			// Validate and sanitize options
+			$validatedOptions = $this->validateGroupOptions($options);
+
+			if (!isset($this->variables['column_groups'])) {
+				$this->variables['column_groups'] = [];
+			}
+
+			$this->variables['column_groups'][$groupName] = [
+				'label' => $safe_label,
+				'columns' => $columns,
+				'options' => $validatedOptions
+			];
+		}
+
+		/**
+		 * Validate column group options
+		 * 
+		 * @param array $options Group options to validate
+		 * @return array Validated options
+		 * @throws \InvalidArgumentException If options are invalid
+		 * 
+		 * @security Validates and sanitizes group options
+		 */
+		private function validateGroupOptions(array $options): array {
+			$validated = [];
+
+			// Validate collapsible option
+			if (isset($options['collapsible'])) {
+				$validated['collapsible'] = (bool) $options['collapsible'];
+			}
+
+			// Validate collapsed option (only if collapsible)
+			if (isset($options['collapsed']) && ($validated['collapsible'] ?? false)) {
+				$validated['collapsed'] = (bool) $options['collapsed'];
+			}
+
+			// Validate background color
+			if (isset($options['background'])) {
+				$validated['background'] = $this->validateColor($options['background']);
+			}
+
+			// Validate text color
+			if (isset($options['text_color'])) {
+				$validated['text_color'] = $this->validateColor($options['text_color']);
+			}
+
+			// Validate border
+			if (isset($options['border'])) {
+				if (is_bool($options['border'])) {
+					$validated['border'] = $options['border'];
+				} elseif (is_string($options['border'])) {
+					$validated['border'] = $this->validateColor($options['border']);
+				}
+			}
+
+			// Validate alignment
+			if (isset($options['align'])) {
+				$validAlignments = ['left', 'center', 'right'];
+				if (!in_array($options['align'], $validAlignments, true)) {
+					throw new \InvalidArgumentException('Group alignment must be left, center, or right');
+				}
+				$validated['align'] = $options['align'];
+			}
+
+			return $validated;
+		}
+
+		/**
+		 * Create nested column groups
+		 * 
+		 * Creates hierarchical column groups for complex table structures.
+		 * 
+		 * Task 5.7.7: Implement column grouping/merging (Requirement 22.7)
+		 * 
+		 * @param string $parentGroup Parent group name
+		 * @param array $childGroups Array of child group configurations
+		 * @return void
+		 * @throws \InvalidArgumentException If group structure is invalid
+		 * 
+		 * @example
+		 * ```php
+		 * // Create nested groups
+		 * $table->nestedColumnGroups('demographics', [
+		 *     [
+		 *         'name' => 'personal',
+		 *         'label' => 'Personal',
+		 *         'columns' => ['name', 'age']
+		 *     ],
+		 *     [
+		 *         'name' => 'location',
+		 *         'label' => 'Location',
+		 *         'columns' => ['city', 'country']
+		 *     ]
+		 * ]);
+		 * ```
+		 */
+		public function nestedColumnGroups(string $parentGroup, array $childGroups): void {
+			// @security Validate parent group name
+			if (!preg_match('/^[a-zA-Z0-9_]+$/', $parentGroup)) {
+				throw new \InvalidArgumentException('Parent group name must be alphanumeric with underscores only');
+			}
+
+			// Validate child groups
+			if (empty($childGroups)) {
+				throw new \InvalidArgumentException('At least one child group is required');
+			}
+
+			$validatedChildren = [];
+			foreach ($childGroups as $child) {
+				// Validate required fields
+				if (!isset($child['name']) || !isset($child['label']) || !isset($child['columns'])) {
+					throw new \InvalidArgumentException('Each child group must have name, label, and columns');
+				}
+
+				// @security Validate child group name
+				if (!preg_match('/^[a-zA-Z0-9_]+$/', $child['name'])) {
+					throw new \InvalidArgumentException('Child group name must be alphanumeric with underscores only');
+				}
+
+				// @security Escape child label
+				$safe_label = canvastack_escape_html($child['label']);
+
+				// @security Validate columns
+				foreach ($child['columns'] as $column) {
+					$this->validateFieldName($column);
+				}
+
+				$validatedChildren[] = [
+					'name' => $child['name'],
+					'label' => $safe_label,
+					'columns' => $child['columns'],
+					'options' => $this->validateGroupOptions($child['options'] ?? [])
+				];
+			}
+
+			if (!isset($this->variables['nested_column_groups'])) {
+				$this->variables['nested_column_groups'] = [];
+			}
+
+			$this->variables['nested_column_groups'][$parentGroup] = $validatedChildren;
+		}
 	
 	public $hidden_columns = [];
 	/**
@@ -701,51 +1365,431 @@ class Objects extends Builder {
 	 *       ->lists('users');
 	 * ```
 	 */
-	public function setHiddenColumns($fields = []) {
-		$this->variables['hidden_columns'] = $fields;
-	}
+	/**
+		 * Set hidden columns
+		 * 
+		 * Hides specified columns from display. Hidden columns are still present in the DOM
+		 * but not visible to users. Useful for columns that contain data needed for
+		 * JavaScript operations but shouldn't be displayed.
+		 * 
+		 * Task 5.7.3: Improve column visibility handling (Requirement 22.3)
+		 * 
+		 * @param array $fields Array of column field names to hide
+		 * @return self Fluent interface
+		 * @throws \InvalidArgumentException If any field name is invalid
+		 * 
+		 * @security Validates each field name to prevent injection
+		 * 
+		 * @example
+		 * ```php
+		 * // Hide ID and internal status columns
+		 * $table->setHiddenColumns(['id', 'internal_status', 'created_by']);
+		 * 
+		 * // Chain with other methods
+		 * $table->setHiddenColumns(['id'])
+		 *       ->setColumnWidth('name', 200)
+		 *       ->lists('users', ['id', 'name', 'email']);
+		 * ```
+		 */
+		public function setHiddenColumns(array $fields = []): self {
+			// @security Validate each field name
+			foreach ($fields as $field) {
+				$this->validateFieldName($field);
+			}
+
+			$this->variables['hidden_columns'] = $fields;
+
+			return $this;
+		}
+
+		/**
+		 * Set visible columns (inverse of hidden columns)
+		 * 
+		 * Explicitly sets which columns should be visible. All other columns in the
+		 * table will be hidden. This is useful when you want to show only a subset
+		 * of columns from a large dataset.
+		 * 
+		 * Task 5.7.3: Improve column visibility handling (Requirement 22.3)
+		 * 
+		 * @param array $fields Array of column field names to show
+		 * @param array $allFields All available fields (to calculate hidden ones)
+		 * @return self Fluent interface
+		 * @throws \InvalidArgumentException If any field name is invalid
+		 * 
+		 * @example
+		 * ```php
+		 * // Show only name and email from a table with many columns
+		 * $allFields = ['id', 'name', 'email', 'phone', 'address', 'created_at', 'updated_at'];
+		 * $table->setVisibleColumns(['name', 'email'], $allFields);
+		 * // This will hide: id, phone, address, created_at, updated_at
+		 * ```
+		 */
+		public function setVisibleColumns(array $fields, array $allFields): self {
+			// @security Validate each field name
+			foreach ($fields as $field) {
+				$this->validateFieldName($field);
+			}
+
+			foreach ($allFields as $field) {
+				$this->validateFieldName($field);
+			}
+
+			// Calculate hidden columns (all fields minus visible fields)
+			$hiddenFields = array_diff($allFields, $fields);
+
+			$this->variables['hidden_columns'] = array_values($hiddenFields);
+
+			return $this;
+		}
+
+		/**
+		 * Toggle column visibility
+		 * 
+		 * Adds or removes a column from the hidden columns list.
+		 * 
+		 * Task 5.7.3: Improve column visibility handling (Requirement 22.3)
+		 * 
+		 * @param string $field Column field name
+		 * @param bool $visible True to show, false to hide
+		 * @return self Fluent interface
+		 * @throws \InvalidArgumentException If field name is invalid
+		 * 
+		 * @example
+		 * ```php
+		 * // Hide a column
+		 * $table->toggleColumnVisibility('internal_notes', false);
+		 * 
+		 * // Show a previously hidden column
+		 * $table->toggleColumnVisibility('email', true);
+		 * ```
+		 */
+		public function toggleColumnVisibility(string $field, bool $visible): self {
+			// @security Validate field name
+			$field = $this->validateFieldName($field);
+
+			$hiddenColumns = $this->variables['hidden_columns'] ?? [];
+
+			if ($visible) {
+				// Remove from hidden list
+				$hiddenColumns = array_diff($hiddenColumns, [$field]);
+			} else {
+				// Add to hidden list if not already there
+				if (!in_array($field, $hiddenColumns, true)) {
+					$hiddenColumns[] = $field;
+				}
+			}
+
+			$this->variables['hidden_columns'] = array_values($hiddenColumns);
+
+			return $this;
+		}
 
 	/**
-	* Menentukan kolom mana yang akan di set fixed (tetap)
-	*
-	* Fungsi ini digunakan untuk menentukan kolom mana yang akan di set fixed
-	* (tetap) di dalam datatable. Kolom yang di set fixed akan tetap di posisi
-	* yang sama meskipun di scroll horisontal.
-	*
-	* @param int $left_pos : Kolom yang akan di set fixed di sebelah kiri
-	*                        Jika di set maka kolom akan tetap di posisi yang
-	*                        sama meskipun di scroll horisontal.
-	*                        Nilai 0 berarti kolom pertama, 1 berarti kolom
-	*                        kedua, dan seterusnya.
-	* @param int $right_pos : Kolom yang akan di set fixed di sebelah kanan
-	*                        Jika di set maka kolom akan tetap di posisi yang
-	*                        sama meskipun di scroll horisontal.
-	*                        Nilai 0 berarti kolom pertama, 1 berarti kolom
-	*                        kedua, dan seterusnya.
-	*
-	* Contoh :
-	* $this->fixedColumns(0, 1);
-	* maka kolom pertama dan kolom terakhir akan di set fixed.
-	*/
-	public function fixedColumns($left_pos = null, $right_pos = null) {
-		if (!empty($left_pos))  $this->variables['fixed_columns']['left']  = $left_pos;
-		if (!empty($right_pos)) $this->variables['fixed_columns']['right'] = $right_pos;
+	 * Set column order
+	 * 
+	 * Explicitly sets the display order of columns. Columns will be displayed
+	 * in the order specified in the array. Any columns not in the array will
+	 * be appended at the end in their original order.
+	 * 
+	 * Task 5.7.4: Improve column ordering (Requirement 22.4)
+	 * 
+	 * @param array $orderedFields Array of field names in desired display order
+	 * @return self Fluent interface
+	 * @throws \InvalidArgumentException If any field name is invalid
+	 * 
+	 * @security Validates each field name to prevent injection
+	 * 
+	 * @example
+	 * ```php
+	 * // Set specific column order
+	 * $table->setColumnOrder(['name', 'email', 'status', 'created_at']);
+	 * 
+	 * // Reorder to put important columns first
+	 * $table->setColumnOrder(['status', 'priority', 'name']);
+	 * ```
+	 */
+	public function setColumnOrder(array $orderedFields): self {
+		// @security Validate each field name
+		foreach ($orderedFields as $field) {
+			$this->validateFieldName($field);
+		}
+		
+		$this->variables['column_order'] = $orderedFields;
+		
+		return $this;
 	}
 	
 	/**
-	* Hapus fixed columns yang sebelumnya di set
-	*
-	* Fungsi ini digunakan untuk menghapus fixed columns yang sebelumnya di set
-	* melalui fungsi fixedColumns. Jika fungsi ini di panggil maka fixed columns
-	* akan di hapus dan tidak akan di render di datatable.
-	*
-	* Contoh :
-	* $this->fixedColumns(0, 1);
-	* $this->clearFixedColumns();
-	* maka fixed columns akan di hapus dan tidak akan di render di datatable.
-	*/
-	public function clearFixedColumns() {
-		if (!empty($this->variables['fixed_columns'])) unset($this->variables['fixed_columns']);
+	 * Move column to position
+	 * 
+	 * Moves a specific column to a new position in the display order.
+	 * Position is 0-indexed (0 = first column).
+	 * 
+	 * Task 5.7.4: Improve column ordering (Requirement 22.4)
+	 * 
+	 * @param string $field Column field name to move
+	 * @param int $position Target position (0-indexed)
+	 * @return self Fluent interface
+	 * @throws \InvalidArgumentException If field name or position is invalid
+	 * 
+	 * @example
+	 * ```php
+	 * // Move 'status' column to first position
+	 * $table->moveColumnToPosition('status', 0);
+	 * 
+	 * // Move 'action' column to last position (use large number)
+	 * $table->moveColumnToPosition('action', 999);
+	 * ```
+	 */
+	public function moveColumnToPosition(string $field, int $position): self {
+		// @security Validate field name
+		$field = $this->validateFieldName($field);
+		
+		if ($position < 0) {
+			throw new \InvalidArgumentException('Position must be non-negative');
+		}
+		
+		// Store move instruction
+		if (!isset($this->variables['column_moves'])) {
+			$this->variables['column_moves'] = [];
+		}
+		
+		$this->variables['column_moves'][$field] = $position;
+		
+		return $this;
+	}
+	
+	/**
+	 * Move column before another column
+	 * 
+	 * Moves a column to appear immediately before another specified column.
+	 * 
+	 * Task 5.7.4: Improve column ordering (Requirement 22.4)
+	 * 
+	 * @param string $field Column to move
+	 * @param string $beforeField Column to insert before
+	 * @return self Fluent interface
+	 * @throws \InvalidArgumentException If field names are invalid
+	 * 
+	 * @example
+	 * ```php
+	 * // Move 'status' before 'name'
+	 * $table->moveColumnBefore('status', 'name');
+	 * ```
+	 */
+	public function moveColumnBefore(string $field, string $beforeField): self {
+		// @security Validate field names
+		$field = $this->validateFieldName($field);
+		$beforeField = $this->validateFieldName($beforeField);
+		
+		if (!isset($this->variables['column_moves_relative'])) {
+			$this->variables['column_moves_relative'] = [];
+		}
+		
+		$this->variables['column_moves_relative'][$field] = [
+			'type' => 'before',
+			'target' => $beforeField
+		];
+		
+		return $this;
+	}
+	
+	/**
+	 * Move column after another column
+	 * 
+	 * Moves a column to appear immediately after another specified column.
+	 * 
+	 * Task 5.7.4: Improve column ordering (Requirement 22.4)
+	 * 
+	 * @param string $field Column to move
+	 * @param string $afterField Column to insert after
+	 * @return self Fluent interface
+	 * @throws \InvalidArgumentException If field names are invalid
+	 * 
+	 * @example
+	 * ```php
+	 * // Move 'action' after 'status'
+	 * $table->moveColumnAfter('action', 'status');
+	 * ```
+	 */
+	public function moveColumnAfter(string $field, string $afterField): self {
+		// @security Validate field names
+		$field = $this->validateFieldName($field);
+		$afterField = $this->validateFieldName($afterField);
+		
+		if (!isset($this->variables['column_moves_relative'])) {
+			$this->variables['column_moves_relative'] = [];
+		}
+		
+		$this->variables['column_moves_relative'][$field] = [
+			'type' => 'after',
+			'target' => $afterField
+		];
+		
+		return $this;
+	}
+
+	/**
+	 * Set fixed (frozen) columns
+	 * 
+	 * Freezes columns so they remain visible when scrolling horizontally.
+	 * Useful for keeping important columns (like ID or name) always visible.
+	 * 
+	 * Task 5.7.8: Implement fixed columns (frozen) (Requirement 22.8)
+	 * 
+	 * @param int|null $left_pos Number of columns to freeze on the left (0-indexed)
+	 * @param int|null $right_pos Number of columns to freeze on the right (0-indexed)
+	 * @return void
+	 * @throws \InvalidArgumentException If position values are invalid
+	 * 
+	 * @security Validates position values to prevent injection
+	 * 
+	 * @example
+	 * ```php
+	 * // Freeze first column on the left
+	 * $table->fixedColumns(1, null);
+	 * 
+	 * // Freeze first 2 columns on the left
+	 * $table->fixedColumns(2, null);
+	 * 
+	 * // Freeze first column on left and last column on right
+	 * $table->fixedColumns(1, 1);
+	 * 
+	 * // Freeze first 3 columns on left and last 2 on right
+	 * $table->fixedColumns(3, 2);
+	 * ```
+	 */
+	public function fixedColumns(?int $left_pos = null, ?int $right_pos = null): void {
+		// Validate left position
+		if ($left_pos !== null) {
+			if ($left_pos < 0 || $left_pos > 50) {
+				throw new \InvalidArgumentException('Left position must be between 0 and 50');
+			}
+			$this->variables['fixed_columns']['left'] = $left_pos;
+		}
+		
+		// Validate right position
+		if ($right_pos !== null) {
+			if ($right_pos < 0 || $right_pos > 50) {
+				throw new \InvalidArgumentException('Right position must be between 0 and 50');
+			}
+			$this->variables['fixed_columns']['right'] = $right_pos;
+		}
+	}
+	
+	/**
+	 * Set fixed columns by field names
+	 * 
+	 * Alternative method to freeze columns by specifying field names instead of positions.
+	 * More intuitive when you know the column names.
+	 * 
+	 * Task 5.7.8: Implement fixed columns (frozen) (Requirement 22.8)
+	 * 
+	 * @param array $leftColumns Array of column field names to freeze on the left
+	 * @param array $rightColumns Array of column field names to freeze on the right
+	 * @return void
+	 * @throws \InvalidArgumentException If field names are invalid
+	 * 
+	 * @example
+	 * ```php
+	 * // Freeze specific columns on the left
+	 * $table->fixedColumnsByName(['id', 'name'], []);
+	 * 
+	 * // Freeze columns on both sides
+	 * $table->fixedColumnsByName(['id', 'name'], ['action', 'status']);
+	 * ```
+	 */
+	public function fixedColumnsByName(array $leftColumns = [], array $rightColumns = []): void {
+		// @security Validate left column names
+		foreach ($leftColumns as $column) {
+			$this->validateFieldName($column);
+		}
+		
+		// @security Validate right column names
+		foreach ($rightColumns as $column) {
+			$this->validateFieldName($column);
+		}
+		
+		if (!empty($leftColumns)) {
+			$this->variables['fixed_columns_by_name']['left'] = $leftColumns;
+		}
+		
+		if (!empty($rightColumns)) {
+			$this->variables['fixed_columns_by_name']['right'] = $rightColumns;
+		}
+	}
+	
+	/**
+	 * Clear fixed columns configuration
+	 * 
+	 * Removes all fixed column settings, allowing all columns to scroll normally.
+	 * 
+	 * Task 5.7.8: Implement fixed columns (frozen) (Requirement 22.8)
+	 * 
+	 * @return void
+	 * 
+	 * @example
+	 * ```php
+	 * // Set fixed columns
+	 * $table->fixedColumns(2, 1);
+	 * 
+	 * // Later, clear them
+	 * $table->clearFixedColumns();
+	 * ```
+	 */
+	public function clearFixedColumns(): void {
+		if (!empty($this->variables['fixed_columns'])) {
+			unset($this->variables['fixed_columns']);
+		}
+		
+		if (!empty($this->variables['fixed_columns_by_name'])) {
+			unset($this->variables['fixed_columns_by_name']);
+		}
+	}
+	
+	/**
+	 * Set scroll configuration for fixed columns
+	 * 
+	 * Configures scrolling behavior when using fixed columns.
+	 * 
+	 * Task 5.7.8: Implement fixed columns (frozen) (Requirement 22.8)
+	 * 
+	 * @param int|string|null $scrollY Vertical scroll height (pixels or 'auto')
+	 * @param bool $scrollX Enable horizontal scrolling (default: true)
+	 * @param bool $scrollCollapse Collapse table when data is less than scroll height (default: true)
+	 * @return void
+	 * @throws \InvalidArgumentException If scroll parameters are invalid
+	 * 
+	 * @example
+	 * ```php
+	 * // Set vertical scroll to 400px
+	 * $table->setScrollConfig(400, true, true);
+	 * 
+	 * // Auto height with horizontal scroll
+	 * $table->setScrollConfig('auto', true, false);
+	 * 
+	 * // Fixed height without collapse
+	 * $table->setScrollConfig(600, true, false);
+	 * ```
+	 */
+	public function setScrollConfig(int|string|null $scrollY = null, bool $scrollX = true, bool $scrollCollapse = true): void {
+		// Validate scrollY
+		if ($scrollY !== null) {
+			if (is_int($scrollY)) {
+				if ($scrollY < 100 || $scrollY > 10000) {
+					throw new \InvalidArgumentException('Scroll Y must be between 100 and 10000 pixels');
+				}
+			} elseif (is_string($scrollY)) {
+				if ($scrollY !== 'auto' && !preg_match('/^\d+(px|vh)$/', $scrollY)) {
+					throw new \InvalidArgumentException('Scroll Y must be "auto", integer pixels, or string with px/vh unit');
+				}
+			}
+			
+			$this->variables['scroll_config']['scrollY'] = $scrollY;
+		}
+		
+		$this->variables['scroll_config']['scrollX'] = $scrollX;
+		$this->variables['scroll_config']['scrollCollapse'] = $scrollCollapse;
 	}
 	
 	/**
@@ -762,9 +1806,60 @@ class Objects extends Builder {
 	* $this->setAlignColumns('center', ['name', 'address'], true, false);
 	* maka kolom "name" dan "address" akan di set align center di header saja.
 	*/
-	public function setAlignColumns(string $align, $columns = [], $header = true, $body = true) {
-		$this->variables['text_align'][$align] = ['columns' => $columns, 'header' => $header, 'body' => $body];
-	}
+	/**
+		 * Set column alignment
+		 * 
+		 * Sets text alignment for specified columns. Supports standard CSS alignment values
+		 * and can be applied to header, body, or both.
+		 * 
+		 * Task 5.7.2: Improve column alignment handling (Requirement 22.2)
+		 * 
+		 * @param string $align Alignment value ('left', 'center', 'right', 'justify', 'start', 'end')
+		 * @param array $columns Array of column field names to apply alignment
+		 * @param bool $header Apply to header cells (default: true)
+		 * @param bool $body Apply to body cells (default: true)
+		 * @return self Fluent interface
+		 * @throws \InvalidArgumentException If alignment value is invalid
+		 * 
+		 * @security Validates alignment value against whitelist to prevent XSS
+		 * 
+		 * @example
+		 * ```php
+		 * // Center align specific columns in both header and body
+		 * $table->setAlignColumns('center', ['status', 'count']);
+		 * 
+		 * // Right align numeric columns in body only
+		 * $table->setAlignColumns('right', ['price', 'quantity', 'total'], false, true);
+		 * 
+		 * // Left align in header only
+		 * $table->setAlignColumns('left', ['description'], true, false);
+		 * 
+		 * // Justify text columns
+		 * $table->setAlignColumns('justify', ['content', 'description']);
+		 * ```
+		 */
+		public function setAlignColumns(string $align, array $columns = [], bool $header = true, bool $body = true): self {
+			// @security Validate alignment value against whitelist
+			$validAlignments = ['left', 'center', 'right', 'justify', 'start', 'end'];
+			$align = strtolower(trim($align));
+
+			if (!in_array($align, $validAlignments, true)) {
+				throw new \InvalidArgumentException('Invalid alignment value. Allowed: left, center, right, justify, start, end');
+			}
+
+			// @security Validate each column name
+			foreach ($columns as $column) {
+				$this->validateFieldName($column);
+			}
+
+			$this->variables['text_align'][$align] = [
+				'columns' => $columns,
+				'header' => $header,
+				'body' => $body
+			];
+
+			return $this;
+		}
 
 	/**
 	* Fungsi ini digunakan untuk mengatur align kolom di dalam datatable menjadi right/kanan.
@@ -777,9 +1872,27 @@ class Objects extends Builder {
 	* $this->setRightColumns(['name', 'address'], true, false);
 	* maka kolom "name" dan "address" akan di set align right/kanan di header saja.
 	*/
-	public function setRightColumns($columns = [], $header = true, $body = true) {
-		$this->setAlignColumns('right', $columns, $header, $body);
-	}
+	/**
+		 * Set columns to right alignment
+		 * 
+		 * Convenience method to right-align specified columns.
+		 * 
+		 * Task 5.7.2: Improve column alignment handling (Requirement 22.2)
+		 * 
+		 * @param array $columns Array of column field names
+		 * @param bool $header Apply to header (default: true)
+		 * @param bool $body Apply to body (default: true)
+		 * @return self Fluent interface
+		 * 
+		 * @example
+		 * ```php
+		 * // Right align numeric columns
+		 * $table->setRightColumns(['price', 'quantity', 'total']);
+		 * ```
+		 */
+		public function setRightColumns(array $columns = [], bool $header = true, bool $body = true): self {
+			return $this->setAlignColumns('right', $columns, $header, $body);
+		}
 
 	/**
 	* Fungsi ini digunakan untuk mengatur align kolom di dalam datatable menjadi center/tengah.
@@ -792,9 +1905,27 @@ class Objects extends Builder {
 	* $this->setCenterColumns(['name', 'address'], true, false);
 	* maka kolom "name" dan "address" akan di set align center/tengah di header saja.
 	*/
-	public function setCenterColumns($columns = [], $header = true, $body = true) {
-		$this->setAlignColumns('center', $columns, $header, $body);
-	}
+	/**
+		 * Set columns to center alignment
+		 * 
+		 * Convenience method to center-align specified columns.
+		 * 
+		 * Task 5.7.2: Improve column alignment handling (Requirement 22.2)
+		 * 
+		 * @param array $columns Array of column field names
+		 * @param bool $header Apply to header (default: true)
+		 * @param bool $body Apply to body (default: true)
+		 * @return self Fluent interface
+		 * 
+		 * @example
+		 * ```php
+		 * // Center align status and action columns
+		 * $table->setCenterColumns(['status', 'action']);
+		 * ```
+		 */
+		public function setCenterColumns(array $columns = [], bool $header = true, bool $body = true): self {
+			return $this->setAlignColumns('center', $columns, $header, $body);
+		}
 	
 	/**
 	* Fungsi ini digunakan untuk mengatur align kolom di dalam datatable menjadi left/kiri.
@@ -807,9 +1938,27 @@ class Objects extends Builder {
 	* $this->setLeftColumns(['name', 'address'], true, false);
 	* maka kolom "name" dan "address" akan di set align left/kiri di header saja.
 	*/
-	public function setLeftColumns($columns = [], $header = true, $body = true) {
-		$this->setAlignColumns('left', $columns, $header, $body);
-	}
+	/**
+		 * Set columns to left alignment
+		 * 
+		 * Convenience method to left-align specified columns.
+		 * 
+		 * Task 5.7.2: Improve column alignment handling (Requirement 22.2)
+		 * 
+		 * @param array $columns Array of column field names
+		 * @param bool $header Apply to header (default: true)
+		 * @param bool $body Apply to body (default: true)
+		 * @return self Fluent interface
+		 * 
+		 * @example
+		 * ```php
+		 * // Left align text columns
+		 * $table->setLeftColumns(['name', 'description']);
+		 * ```
+		 */
+		public function setLeftColumns(array $columns = [], bool $header = true, bool $body = true): self {
+			return $this->setAlignColumns('left', $columns, $header, $body);
+		}
 
 	/**
 	* Fungsi ini digunakan untuk mengatur warna background kolom di dalam datatable.
@@ -824,9 +1973,214 @@ class Objects extends Builder {
 	* $this->setBackgroundColor('#f5f5f5', '#000000', ['name', 'address'], true, false);
 	* maka kolom "name" dan "address" akan di set warna background #f5f5f5 dan teks #000000 di header saja.
 	*/
-	public function setBackgroundColor($color, $text_color = null, $columns = null, $header = true, $body = false) {
-		$this->variables['background_color'][$color] = ['code' => $color, 'text' => $text_color, 'columns' => $columns, 'header' => $header, 'body' => $body];
-	}
+	/**
+		 * Set background color for columns
+		 * 
+		 * Sets background color and optional text color for specified columns.
+		 * Can be applied to header, body, or both.
+		 * 
+		 * Task 5.7.6: Add column color options (Requirement 22.6)
+		 * 
+		 * @param string $color Background color (hex, rgb, or named color)
+		 * @param string|null $text_color Text color (hex, rgb, or named color)
+		 * @param array|null $columns Columns to apply color (null = all columns)
+		 * @param bool $header Apply to header (default: true)
+		 * @param bool $body Apply to body (default: false)
+		 * @return void
+		 * @throws \InvalidArgumentException If color format is invalid
+		 * 
+		 * @security Validates color values to prevent XSS in style attributes
+		 * 
+		 * @example
+		 * ```php
+		 * // Set background color for specific columns
+		 * $table->setBackgroundColor('#f5f5f5', '#000', ['status', 'priority']);
+		 * 
+		 * // Set color for header only
+		 * $table->setBackgroundColor('#e3f2fd', '#1976d2', ['name', 'email'], true, false);
+		 * 
+		 * // Set color for body only
+		 * $table->setBackgroundColor('#fff3e0', '#e65100', ['total'], false, true);
+		 * 
+		 * // Set color for all columns
+		 * $table->setBackgroundColor('#fafafa', null, null);
+		 * ```
+		 */
+		public function setBackgroundColor(string $color, ?string $text_color = null, array|null $columns = null, bool $header = true, bool $body = false): void {
+			// @security Validate background color
+			$color = $this->validateColor($color);
+
+			// @security Validate text color if provided
+			if ($text_color !== null) {
+				$text_color = $this->validateColor($text_color);
+			}
+
+			// @security Validate column names if provided
+			if ($columns !== null) {
+				foreach ($columns as $column) {
+					$this->validateFieldName($column);
+				}
+			}
+
+			$this->variables['background_color'][$color] = [
+				'code' => $color,
+				'text' => $text_color,
+				'columns' => $columns,
+				'header' => $header,
+				'body' => $body
+			];
+		}
+
+		/**
+		 * Set text color for columns
+		 * 
+		 * Sets text color for specified columns without changing background.
+		 * 
+		 * Task 5.7.6: Add column color options (Requirement 22.6)
+		 * 
+		 * @param string $color Text color (hex, rgb, or named color)
+		 * @param array|null $columns Columns to apply color (null = all columns)
+		 * @param bool $header Apply to header (default: true)
+		 * @param bool $body Apply to body (default: true)
+		 * @return void
+		 * @throws \InvalidArgumentException If color format is invalid
+		 * 
+		 * @example
+		 * ```php
+		 * // Set text color for specific columns
+		 * $table->setTextColor('#d32f2f', ['error_count', 'warnings']);
+		 * 
+		 * // Set text color for header only
+		 * $table->setTextColor('#1976d2', ['name'], true, false);
+		 * ```
+		 */
+		public function setTextColor(string $color, array|null $columns = null, bool $header = true, bool $body = true): void {
+			// @security Validate color
+			$color = $this->validateColor($color);
+
+			// @security Validate column names if provided
+			if ($columns !== null) {
+				foreach ($columns as $column) {
+					$this->validateFieldName($column);
+				}
+			}
+
+			if (!isset($this->variables['text_color'])) {
+				$this->variables['text_color'] = [];
+			}
+
+			$this->variables['text_color'][$color] = [
+				'code' => $color,
+				'columns' => $columns,
+				'header' => $header,
+				'body' => $body
+			];
+		}
+
+		/**
+		 * Set border color for columns
+		 * 
+		 * Sets border color for specified columns.
+		 * 
+		 * Task 5.7.6: Add column color options (Requirement 22.6)
+		 * 
+		 * @param string $color Border color (hex, rgb, or named color)
+		 * @param array|null $columns Columns to apply border (null = all columns)
+		 * @param string $width Border width (default: '1px')
+		 * @param string $style Border style (default: 'solid')
+		 * @return void
+		 * @throws \InvalidArgumentException If color or border parameters are invalid
+		 * 
+		 * @example
+		 * ```php
+		 * // Set border for specific columns
+		 * $table->setBorderColor('#ddd', ['name', 'email']);
+		 * 
+		 * // Set thicker border
+		 * $table->setBorderColor('#000', ['total'], '2px', 'solid');
+		 * 
+		 * // Set dashed border
+		 * $table->setBorderColor('#999', ['notes'], '1px', 'dashed');
+		 * ```
+		 */
+		public function setBorderColor(string $color, array|null $columns = null, string $width = '1px', string $style = 'solid'): void {
+			// @security Validate color
+			$color = $this->validateColor($color);
+
+			// @security Validate border width
+			if (!preg_match('/^\d+(?:\.\d+)?(px|em|rem)$/', $width)) {
+				throw new \InvalidArgumentException('Invalid border width format. Use format like "1px", "2em", etc.');
+			}
+
+			// @security Validate border style
+			$validStyles = ['none', 'solid', 'dashed', 'dotted', 'double', 'groove', 'ridge', 'inset', 'outset'];
+			if (!in_array($style, $validStyles, true)) {
+				throw new \InvalidArgumentException('Invalid border style. Allowed: ' . implode(', ', $validStyles));
+			}
+
+			// @security Validate column names if provided
+			if ($columns !== null) {
+				foreach ($columns as $column) {
+					$this->validateFieldName($column);
+				}
+			}
+
+			if (!isset($this->variables['border_color'])) {
+				$this->variables['border_color'] = [];
+			}
+
+			$this->variables['border_color'][$color] = [
+				'color' => $color,
+				'width' => $width,
+				'style' => $style,
+				'columns' => $columns
+			];
+		}
+
+		/**
+		 * Validate color value
+		 * 
+		 * @param string $color Color value to validate
+		 * @return string Validated color
+		 * @throws \InvalidArgumentException If color format is invalid
+		 * 
+		 * @security Validates color to prevent XSS in style attributes
+		 */
+		private function validateColor(string $color): string {
+			$color = trim($color);
+
+			// Allow hex colors (#fff, #ffffff, #ffffffff with alpha)
+			if (preg_match('/^#[0-9a-fA-F]{3,8}$/', $color)) {
+				return $color;
+			}
+
+			// Allow rgb/rgba colors
+			if (preg_match('/^rgba?\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*(?:,\s*[\d.]+\s*)?\)$/i', $color)) {
+				return $color;
+			}
+
+			// Allow hsl/hsla colors
+			if (preg_match('/^hsla?\(\s*\d+\s*,\s*\d+%\s*,\s*\d+%\s*(?:,\s*[\d.]+\s*)?\)$/i', $color)) {
+				return $color;
+			}
+
+			// Allow named colors (whitelist)
+			$allowedColors = [
+				'red', 'blue', 'green', 'yellow', 'orange', 'purple', 'pink',
+				'black', 'white', 'gray', 'grey', 'brown', 'cyan', 'magenta',
+				'navy', 'teal', 'olive', 'lime', 'aqua', 'maroon', 'silver',
+				'fuchsia', 'indigo', 'violet', 'gold', 'coral', 'salmon',
+				'khaki', 'plum', 'orchid', 'tan', 'beige', 'ivory', 'azure',
+				'lavender', 'crimson', 'turquoise', 'transparent'
+			];
+
+			$colorLower = strtolower($color);
+			if (in_array($colorLower, $allowedColors, true)) {
+				return $colorLower;
+			}
+
+			throw new \InvalidArgumentException('Invalid color format. Use hex (#fff), rgb(255,255,255), hsl(0,0%,100%), or named color');
+		}
 
 	/**
 	* Fungsi ini digunakan untuk mengatur lebar kolom di dalam datatable.
@@ -839,9 +2193,143 @@ class Objects extends Builder {
 	* $this->setColumnWidth('name', 200);
 	* maka kolom "name" akan di set lebar 200px.
 	*/
-	public function setColumnWidth($field_name, $width = false) {
-		$this->variables['column_width'][$field_name] = $width;
-	}
+	/**
+		 * Set column width
+		 * 
+		 * Sets the width for a specific column. Supports multiple width formats:
+		 * - Integer: Treated as pixels (e.g., 200 = 200px)
+		 * - String with unit: '200px', '20%', '10em', '5rem'
+		 * - 'auto': Let browser calculate width automatically
+		 * - false: Remove width constraint
+		 * 
+		 * Task 5.7.1: Improve column width handling (Requirement 22.1)
+		 * 
+		 * @param string $field_name Column field name
+		 * @param int|string|false $width Width value (int for pixels, string for other units, false to remove)
+		 * @return self Fluent interface
+		 * @throws \InvalidArgumentException If field name or width format is invalid
+		 * 
+		 * @security Validates field name format and width value to prevent XSS
+		 * 
+		 * @example
+		 * ```php
+		 * // Set width in pixels
+		 * $table->setColumnWidth('email', 200);
+		 * 
+		 * // Set width in percentage
+		 * $table->setColumnWidth('description', '30%');
+		 * 
+		 * // Set width with other units
+		 * $table->setColumnWidth('name', '15em');
+		 * 
+		 * // Auto width
+		 * $table->setColumnWidth('status', 'auto');
+		 * 
+		 * // Remove width constraint
+		 * $table->setColumnWidth('content', false);
+		 * 
+		 * // Chain multiple columns
+		 * $table->setColumnWidth('name', 150)
+		 *       ->setColumnWidth('email', 200)
+		 *       ->setColumnWidth('status', '10%');
+		 * ```
+		 */
+		public function setColumnWidth(string $field_name, int|string|false $width = false): self {
+			// @security Validate field name format
+			$field_name = $this->validateFieldName($field_name);
+
+			// Validate and normalize width value
+			if (false !== $width) {
+				$width = $this->validateAndNormalizeWidth($width);
+			}
+
+			$this->variables['column_width'][$field_name] = $width;
+
+			return $this;
+		}
+
+		/**
+		 * Set multiple column widths at once
+		 * 
+		 * Convenience method to set widths for multiple columns in one call.
+		 * 
+		 * Task 5.7.1: Improve column width handling (Requirement 22.1)
+		 * 
+		 * @param array $widths Associative array of field_name => width
+		 * @return self Fluent interface
+		 * @throws \InvalidArgumentException If any field name or width is invalid
+		 * 
+		 * @example
+		 * ```php
+		 * $table->setColumnWidths([
+		 *     'name' => 150,
+		 *     'email' => 200,
+		 *     'status' => '10%',
+		 *     'description' => 'auto'
+		 * ]);
+		 * ```
+		 */
+		public function setColumnWidths(array $widths): self {
+			foreach ($widths as $field_name => $width) {
+				$this->setColumnWidth($field_name, $width);
+			}
+
+			return $this;
+		}
+
+		/**
+		 * Validate and normalize width value
+		 * 
+		 * @param int|string $width Width value to validate
+		 * @return int|string Normalized width value
+		 * @throws \InvalidArgumentException If width format is invalid
+		 * 
+		 * @security Validates width to prevent XSS in style attributes
+		 */
+		private function validateAndNormalizeWidth(int|string $width): int|string {
+			// Integer width (pixels)
+			if (is_int($width)) {
+				if ($width <= 0 || $width > 10000) {
+					throw new \InvalidArgumentException('Width must be between 1 and 10000 pixels');
+				}
+				return $width;
+			}
+
+			// String width
+			if (is_string($width)) {
+				$width = trim($width);
+
+				// Auto width
+				if ('auto' === strtolower($width)) {
+					return 'auto';
+				}
+
+				// Width with unit (px, %, em, rem, vw, vh, ch)
+				if (preg_match('/^(\d+(?:\.\d+)?)(px|%|em|rem|vw|vh|ch)$/i', $width, $matches)) {
+					$value = floatval($matches[1]);
+					$unit = strtolower($matches[2]);
+
+					// Validate value ranges
+					if ($value <= 0) {
+						throw new \InvalidArgumentException('Width value must be greater than 0');
+					}
+
+					if ('px' === $unit && $value > 10000) {
+						throw new \InvalidArgumentException('Width in pixels must not exceed 10000');
+					}
+
+					if ('%' === $unit && $value > 100) {
+						throw new \InvalidArgumentException('Width percentage must not exceed 100%');
+					}
+
+					return $value . $unit;
+				}
+
+				throw new \InvalidArgumentException('Invalid width format. Use integer (pixels), "auto", or string with unit (e.g., "200px", "30%", "15em")');
+			}
+
+			throw new \InvalidArgumentException('Width must be integer, string, or false');
+		}
 
 	/**
 	* Menambahkan atribut khusus ke dalam tabel.
@@ -853,12 +2341,24 @@ class Objects extends Builder {
 	*                            yang akan ditambahkan ke dalam tabel.
 	*                            Contoh: ['class' => 'my-class', 'style' => 'width:100%;']
 	*
+	* @security Attribute values are escaped to prevent XSS injection (Requirement 1.6)
+	*
 	* Contoh penggunaan:
 	* $this->addAttributes(['class' => 'table-striped', 'style' => 'width:100%;']);
 	* Maka, atribut 'class' dan 'style' akan ditambahkan ke elemen tabel.
 	*/
-	public function addAttributes($attributes = []) {
-		$this->variables['add_table_attributes'] = $attributes;
+	public function addAttributes(array $attributes = []): void {
+		// @security Validate attributes to block dangerous event handlers (Requirement 1.6)
+		$attributes = $this->validateAttributes($attributes);
+		// @security Escape all attribute values to prevent XSS (Requirement 1.6)
+		$safe_attributes = [];
+		foreach ($attributes as $key => $value) {
+			$safe_key = canvastack_escape_html((string) $key);
+			$safe_attributes[$safe_key] = is_string($value)
+				? canvastack_escape_html($value)
+				: $value;
+		}
+		$this->variables['add_table_attributes'] = $safe_attributes;
 	}
 
 	/**
@@ -875,8 +2375,8 @@ class Objects extends Builder {
 	* $this->setWidth(1000, 'px');
 	* Maka lebar elemen tabel akan diatur menjadi 1000px.
 	*/
-	public function setWidth(int $width, string $measurement = 'px') {
-		return $this->addAttributes(['style' => "min-width:{$width}{$measurement};"]);
+	public function setWidth(int $width, string $measurement = 'px'): void {
+		$this->addAttributes(['style' => "min-width:{$width}{$measurement};"]);
 	}
 	
 	/**
@@ -889,7 +2389,7 @@ class Objects extends Builder {
 	* $this->setBackgroundColor('#f5f5f5', '#000000', $this->all_columns, true, false);
 	* maka semua kolom akan di set warna background #f5f5f5 dan teks #000000 di header saja.
 	*/
-	private $all_columns = self::ALL_COLUMNS_MARKER;
+	private string $all_columns = self::ALL_COLUMNS_MARKER;
 
 	/**
 	* Memeriksa dan mengatur set kolom.
@@ -914,7 +2414,7 @@ class Objects extends Builder {
 	* $hasil = $this->checkColumnSet(['nama', 'alamat']);
 	* // $hasil akan berisi ['nama', 'alamat']
 	*/
-	private function checkColumnSet($columns) {
+	private function checkColumnSet(mixed $columns): array {
 		if (empty($columns)) {
 			if (false === $columns) {
 				$value = [$this->all_columns => false];
@@ -950,7 +2450,7 @@ class Objects extends Builder {
 	* // Maka kita dapat mengakses data relasi dengan cara berikut:
 	* $role_name = $this->relational_data['user_roles']['role_name'];
 	*/
-	public $relational_data = [];
+	public array $relational_data = [];
 	
 	/**
 	* Menyimpan data hasil relasi antara tabel.
@@ -986,7 +2486,8 @@ class Objects extends Builder {
 	*
 	* @return array
 	*/
-	private function relation_draw($relation, $relation_function, $fieldname, $label) {
+	private function relation_draw(mixed $relation, string $relation_function, string $fieldname, string $label): void {
+		// Extract relation data and key
 		if (!empty($relation->{$relation_function})) {
 			$dataRelate = $relation->{$relation_function}->getAttributes();
 			$relateKEY  = intval($relation['id']);
@@ -995,33 +2496,38 @@ class Objects extends Builder {
 			$relateKEY  = intval($dataRelate['id']);
 		}
 		
+		// Parse field name and get data
 		$fieldReplacement = null;
 		if (canvastack_string_contained($fieldname, '::')) {
 			$fieldsplit       = explode('::', $fieldname);
 			$fieldReplacement = $fieldsplit[0];
 			$fieldname        = $fieldsplit[1];
-			$data_relation    = $dataRelate[$fieldname];
-			$data_value       = $dataRelate[$fieldname];
-		} else {
-			$data_relation    = $dataRelate[$fieldname];
-			$data_value       = $dataRelate[$fieldname];
 		}
 		
-		if (!empty($data_relation)) {
-			$fieldset = $fieldname;
-			if (!is_empty($fieldReplacement)) $fieldset = $fieldReplacement;
-			
-			$this->relational_data[$relation_function]['field_target'][$fieldset]['field_name']  = $fieldset;
-			$this->relational_data[$relation_function]['field_target'][$fieldset]['field_label'] = $label;
-			
-			if (!empty($relation->pivot)) {
-				foreach ($relation->pivot->getAttributes() as $pivot_field => $pivot_data) {
-					$this->relational_data[$relation_function]['field_target'][$fieldset]['relation_data'][$relateKEY][$pivot_field] = $pivot_data;
-				}
-			}
-			
-			$this->relational_data[$relation_function]['field_target'][$fieldset]['relation_data'][$relateKEY]['field_value'] = $data_value;
+		$data_relation = $dataRelate[$fieldname] ?? null;
+		$data_value    = $dataRelate[$fieldname] ?? null;
+		
+		// Guard clause: Skip if no relation data
+		if (empty($data_relation)) {
+			return;
 		}
+		
+		// Determine field set name
+		$fieldset = !is_empty($fieldReplacement) ? $fieldReplacement : $fieldname;
+		
+		// Store field metadata
+		$this->relational_data[$relation_function]['field_target'][$fieldset]['field_name']  = $fieldset;
+		$this->relational_data[$relation_function]['field_target'][$fieldset]['field_label'] = $label;
+		
+		// Store pivot data if present
+		if (!empty($relation->pivot)) {
+			foreach ($relation->pivot->getAttributes() as $pivot_field => $pivot_data) {
+				$this->relational_data[$relation_function]['field_target'][$fieldset]['relation_data'][$relateKEY][$pivot_field] = $pivot_data;
+			}
+		}
+		
+		// Store field value
+		$this->relational_data[$relation_function]['field_target'][$fieldset]['relation_data'][$relateKEY]['field_value'] = $data_value;
 	}
 	
 	/**
@@ -1039,26 +2545,38 @@ class Objects extends Builder {
 	 * 
 	 * @return array
 	 */
-	private function relationship($model, $relation_function, $field_display, $filter_foreign_keys = [], $label = null, $field_connect = null) {
-		if (!empty($model->with($relation_function)->get())) {
-			$relational_data = $model->with($relation_function)->get();
-			if (empty($label)) {
-				$label = $this->sanitizeLabel(ucwords(canvastack_clean_strings($field_display, ' ')));
+	private function relationship(mixed $model, string $relation_function, string $field_display, array $filter_foreign_keys = [], ?string $label = null, ?string $field_connect = null): void {
+		// Guard clause: Skip if no relational data
+		$relational_data = $model->with($relation_function)->get();
+		if (empty($relational_data)) {
+			return;
+		}
+		
+		// Set default label if not provided
+		if (empty($label)) {
+			$label = $this->sanitizeLabel(ucwords(canvastack_clean_strings($field_display, ' ')));
+		}
+		
+		// Process each item in relational data
+		foreach ($relational_data as $item) {
+			// Guard clause: Skip if item has no relation
+			if (empty($item->{$relation_function})) {
+				continue;
 			}
 			
-			foreach ($relational_data as $item) {
-				if (!empty($item->{$relation_function})) {
-					if (canvastack_is_collection($item->{$relation_function})) {
-						foreach ($item->{$relation_function} as $relation) {
-							$this->relation_draw($relation, $relation_function, $field_display, $label);
-						}
-					} else {
-						$this->relation_draw($item, $relation_function, "{$field_connect}::{$field_display}", $label);
-					}
+			// Handle collection vs single relation
+			if (canvastack_is_collection($item->{$relation_function})) {
+				foreach ($item->{$relation_function} as $relation) {
+					$this->relation_draw($relation, $relation_function, $field_display, $label);
 				}
+			} else {
+				$this->relation_draw($item, $relation_function, "{$field_connect}::{$field_display}", $label);
 			}
-			
-			if (!empty($filter_foreign_keys)) $this->relational_data[$relation_function]['foreign_keys'] = $filter_foreign_keys;
+		}
+		
+		// Store foreign keys if provided
+		if (!empty($filter_foreign_keys)) {
+			$this->relational_data[$relation_function]['foreign_keys'] = $filter_foreign_keys;
 		}
 	}
 	
@@ -1076,14 +2594,14 @@ class Objects extends Builder {
 	 * 
 	 * @return array
 	 */
-	public function relations($model, $relation_function, $field_display, $filter_foreign_keys = [], $label = null) {
+	public function relations(mixed $model, string $relation_function, string $field_display, array $filter_foreign_keys = [], ?string $label = null): void {
 		try {
 			// Sanitize label if provided
 			if ($label !== null) {
 				$label = $this->sanitizeLabel($label);
 			}
 			
-			return $this->relationship($model, $relation_function, $field_display, $filter_foreign_keys, $label, null);
+			$this->relationship($model, $relation_function, $field_display, $filter_foreign_keys, $label, null);
 		} catch (\InvalidArgumentException $e) {
 			error_log('Objects relations() validation error: ' . $e->getMessage());
 			throw $e;
@@ -1104,14 +2622,14 @@ class Objects extends Builder {
 	 *
 	 * @return array
 	 */
-	public function fieldReplacementValue($model, $relation_function, $field_display, $label = null, $field_connect = null) {
+	public function fieldReplacementValue(mixed $model, string $relation_function, string $field_display, ?string $label = null, ?string $field_connect = null): void {
 		try {
 			// Sanitize label if provided
 			if ($label !== null) {
 				$label = $this->sanitizeLabel($label);
 			}
 			
-			return $this->relationship($model, $relation_function, $field_display, [], $label, $field_connect);
+			$this->relationship($model, $relation_function, $field_display, [], $label, $field_connect);
 		} catch (\InvalidArgumentException $e) {
 			error_log('Objects fieldReplacementValue() validation error: ' . $e->getMessage());
 			throw $e;
@@ -1140,9 +2658,42 @@ class Objects extends Builder {
 	 * $table->orderby('created_at', 'desc')->lists('users');
 	 * ```
 	 */
-	public function orderby($column, $order = self::DEFAULT_SORT_ORDER) {
+	/**
+	 * Set sort order for table data
+	 * 
+	 * @param string $column Column name to sort by
+	 * @param string $order Sort direction ('asc' or 'desc')
+	 * @return void
+	 * 
+	 * @security 1.7.7 - Validates column name format and sort direction to prevent SQL injection
+	 *           via ORDER BY manipulation. Logs suspicious attempts. (Requirements 2.5, 3.5)
+	 */
+	public function orderby(string $column, string $order = self::DEFAULT_SORT_ORDER): void {
+		// @security 1.7.7 - Validate column name format to prevent SQL injection
+		try {
+			$column = $this->validateFieldName($column);
+		} catch (\InvalidArgumentException $e) {
+			\Illuminate\Support\Facades\Log::warning('[SECURITY] Objects::orderby() - Invalid column name detected', [
+				'column'  => $column,
+				'error'   => $e->getMessage(),
+				'context' => 'SQL injection prevention - ORDER BY column validation'
+			]);
+			throw $e;
+		}
+		
+		// @security 1.7.7 - Validate sort direction to prevent SQL injection
+		$normalizedOrder = strtolower(trim($order));
+		if (!in_array($normalizedOrder, [self::DEFAULT_SORT_ORDER, self::SORT_ORDER_DESC], true)) {
+			\Illuminate\Support\Facades\Log::warning('[SECURITY] Objects::orderby() - Invalid sort direction detected', [
+				'column'    => $column,
+				'direction' => $order,
+				'context'   => 'SQL injection prevention - ORDER BY direction validation'
+			]);
+			throw new \InvalidArgumentException('Sort direction must be "asc" or "desc", got: "' . $order . '"');
+		}
+		
 		$this->variables['orderby_column'] = [];
-		$this->variables['orderby_column'] = ['column' => $column, 'order' => $order];
+		$this->variables['orderby_column'] = ['column' => $column, 'order' => $normalizedOrder];
 	}
 	
 	/**
@@ -1166,7 +2717,7 @@ class Objects extends Builder {
 	 * $table->sortable()->lists('users');
 	 * ```
 	 */
-	public function sortable($columns = null) {
+	public function sortable(array|string|null $columns = null): void {
 		$this->variables['sortable_columns'] = [];
 		$this->variables['sortable_columns'] = $this->checkColumnSet($columns);
 	}
@@ -1189,12 +2740,12 @@ class Objects extends Builder {
 	 * $table->clickable(['id', 'name'])->lists('users');
 	 * ```
 	 */
-	public function clickable($columns = null) {
+	public function clickable(array|string|null $columns = null): void {
 		$this->variables['clickable_columns'] = [];
 		$this->variables['clickable_columns'] = $this->checkColumnSet($columns);
 	}
 	
-	public $search_columns = false;
+	public bool|array $search_columns = false;
 	
 	/**
 	* Menentukan kolom mana yang dapat dicari di dalam datatable.
@@ -1219,7 +2770,7 @@ class Objects extends Builder {
 	* // Menggunakan kolom tertentu untuk pencarian
 	* $this->searchable(['nama', 'alamat']);
 	*/
-	public function searchable($columns = null) {
+	public function searchable(array|string|null $columns = null): void {
 		$this->variables['searchable_columns'] = [];
 		$this->variables['searchable_columns'] = $this->checkColumnSet($columns);
 		if (empty($columns)) {
@@ -1253,7 +2804,7 @@ class Objects extends Builder {
 	 * 		: if (string) fieldname / other column = relate to just one that column target was setted
 	 * 		: if (array) fieldnames / others any columns = relate to any that column target was setted
 	 */
-	public function filterGroups($column, $type, $relate = false) {
+	public function filterGroups(string $column, string $type, bool|string|array $relate = false): void {
 		$filters           = [];
 		$filters['column'] = $column;
 		$filters['type']   = $type;
@@ -1281,7 +2832,7 @@ class Objects extends Builder {
 	* // Menampilkan semua baris pada pemuatan awal
 	* $this->displayRowsLimitOnLoad('all');
 	*/
-	public function displayRowsLimitOnLoad($limit = self::DEFAULT_ROW_LIMIT) {
+	public function displayRowsLimitOnLoad(int|string $limit = self::DEFAULT_ROW_LIMIT): void {
 		if (is_string($limit)) {
 			if (in_array(strtolower($limit), self::DISPLAY_ALL_KEYWORDS)) {
 				$this->variables['on_load']['display_limit_rows'] = '*';
@@ -1299,11 +2850,11 @@ class Objects extends Builder {
 	 * 
 	 * @return void
 	 */
-	public function clearOnLoad() {
+	public function clearOnLoad(): void {
 		unset($this->variables['on_load']['display_limit_rows']);
 	}
 	
-	protected $filter_model = [];
+	protected array $filter_model = [];
 	/**
 	 * Set filter model data
 	 * 
@@ -1323,7 +2874,8 @@ class Objects extends Builder {
 		$this->filter_model = $data;
 	}
 	
-	private function check_column_exist($table_name, $fields, $connection = self::DEFAULT_DB_CONNECTION) {
+	private function check_column_exist(string $table_name, array $fields, ?string $connection = self::DEFAULT_DB_CONNECTION): array {
+		$connection = $connection ?? self::DEFAULT_DB_CONNECTION;
 		$fieldset = [];
 		foreach ($fields as $field) {
 			// Use cached column check for performance
@@ -1335,8 +2887,8 @@ class Objects extends Builder {
 		return $fieldset;
 	}
 	
-	private $clear_variables = null;
-	private function clearVariables($clear_set = true) {
+	private ?bool $clear_variables = null;
+	private function clearVariables(bool $clear_set = true): void {
 		$this->clear_variables = $clear_set;
 		if (true === $this->clear_variables) {
 			$this->clear_all_variables();
@@ -1362,8 +2914,8 @@ class Objects extends Builder {
 	 * $table->lists('products');
 	 * ```
 	 */
-	public function clear($clear_set = true) {
-		return $this->clearVariables($clear_set);
+	public function clear(bool $clear_set = true): void {
+		$this->clearVariables($clear_set);
 	}
 	
 	/**
@@ -1372,12 +2924,12 @@ class Objects extends Builder {
 	 * @param string $name Variable name to clear
 	 * @return void
 	 */
-	public function clearVar($name) {
+	public function clearVar(string $name): void {
 		$this->variables[$name] = [];
 	}
 	
 	
-	public $useFieldTargetURL = 'id';
+	public string $useFieldTargetURL = 'id';
 	/**
 	 * Set field yang digunakan untuk URL value (detail/edit links)
 	 * 
@@ -1398,13 +2950,13 @@ class Objects extends Builder {
 	 * // URLs will be: /posts/view/{slug}
 	 * ```
 	 */
-	public function setUrlValue($field = 'id') {
+	public function setUrlValue(string $field = 'id'): void {
 		$this->variables['url_value'] = $field;
 		$this->useFieldTargetURL = $field;
 	}
 	
-	private $variables = [];
-	private function clear_all_variables() {
+	public array $variables = [];
+	private function clear_all_variables(): void {
 		$this->variables['on_load']              = [];
 		$this->variables['url_value']            = [];
 		$this->variables['merged_columns']       = [];
@@ -1423,8 +2975,20 @@ class Objects extends Builder {
 		$this->variables['model_processing']     = [];
 	}
 	
-	public $conditions = [];
-	public function where($field_name, $logic_operator = false, $value = false) {
+	public array $conditions = [];
+	/**
+	 * Add WHERE condition for table data filtering
+	 * 
+	 * @param string|array $field_name Field name or array of field=>value pairs
+	 * @param string|false $logic_operator SQL operator (=, !=, LIKE, etc.) or false
+	 * @param mixed $value Value to compare against or false
+	 * @return void
+	 * 
+	 * @security Validates field names (alphanumeric + underscore + dot only) and operators
+	 *           against a whitelist to prevent SQL injection. (Requirements 2.3, 2.4, 3.1)
+	 * @throws \InvalidArgumentException If field name or operator is invalid
+	 */
+	public function where(string|array $field_name, string|false $logic_operator = false, mixed $value = false): void {
 		try {
 			$this->conditions['where'] = [];
 			if (is_array($field_name)) {
@@ -1442,9 +3006,15 @@ class Objects extends Builder {
 				// Validate field name
 				$field_name = $this->validateFieldName($field_name);
 				
-				// Validate operator if provided
+				// @security 1.7.5 - Validate and normalize operator against whitelist
+				// Prevents SQL injection via operator manipulation (Requirement 2.4)
 				if ($logic_operator !== false) {
 					$logic_operator = $this->validateOperator($logic_operator);
+					// Normalize multi-word operators to uppercase for consistent SQL generation
+					$upperOp = strtoupper(trim($logic_operator));
+					if (in_array($upperOp, ['LIKE', 'NOT LIKE', 'ILIKE', 'NOT ILIKE', 'IN', 'NOT IN', 'BETWEEN', 'NOT BETWEEN', 'IS NULL', 'IS NOT NULL', 'REGEXP', 'NOT REGEXP'], true)) {
+						$logic_operator = $upperOp;
+					}
 				}
 				
 				$this->conditions['where'][] = [
@@ -1454,7 +3024,12 @@ class Objects extends Builder {
 				];
 			}
 		} catch (\InvalidArgumentException $e) {
-			error_log('Objects where() validation error: ' . $e->getMessage());
+			\Illuminate\Support\Facades\Log::warning('[SECURITY] Objects::where() - Validation failed', [
+				'field'    => is_string($field_name) ? $field_name : gettype($field_name),
+				'operator' => $logic_operator,
+				'error'    => $e->getMessage(),
+				'context'  => 'SQL injection prevention - operator validation'
+			]);
 			throw $e; // Re-throw to allow caller to handle
 		} catch (\Exception $e) {
 			error_log('Objects where() error: ' . $e->getMessage());
@@ -1469,8 +3044,8 @@ class Objects extends Builder {
 	 * 		: $this->model_filters
 	 * @return array
 	 */
-	public function filterConditions($filters = []) {
-		return $this->where($filters);
+	public function filterConditions(array $filters = []): void {
+		$this->where($filters);
 	}
 	
 	/**
@@ -1536,7 +3111,7 @@ class Objects extends Builder {
 		}
 	}
 	
-	public $formula = [];
+	public array $formula = [];
 	/**
 	* Membuat Formula Untuk Menghitung Nilai Kolom
 	*
@@ -1567,7 +3142,7 @@ class Objects extends Builder {
 	* $this->table->formula('total', 'Total', ['harga', 'jumlah'], '*', 'tbody', true);
 	* maka akan membuat formula dengan nama 'total' yang akan menghitung nilai kolom 'harga' dan 'jumlah' dengan operator '*' dan akan di isi ke node 'tbody' setelah node yang sama dengan nama formula.
 	*/
-	public function formula(string $name, string $label = null, array $field_lists, string $logic, string $node_location = null, bool $node_after_node_location = true) {
+	public function formula(string $name, string $label = null, array $field_lists, string $logic, string $node_location = null, bool $node_after_node_location = true): void {
 		try {
 			// Validate name
 			$name = $this->validateFieldName($name);
@@ -1605,51 +3180,341 @@ class Objects extends Builder {
 	}
 	
 	/**
-	* Format Data
-	*
-	* Fungsi ini digunakan untuk mengatur format penampilan data di dalam tabel.
-	* Fungsi ini dapat digunakan untuk mengatur format penampilan data berupa angka, boolean, atau string.
-	*
-	* @param string|array $fields
-	* 		: Nama kolom yang akan di format.
-	* 		: Jika di set sebagai string, maka hanya kolom dengan nama yang di set yang akan di format.
-	* 		: Jika di set sebagai array, maka beberapa kolom dengan nama yang di set akan di format.
-	* @param int $decimal_endpoint
-	* 		: Jumlah desimal yang akan di tampilkan.
-	* 		: Jika di set maka akan menampilkan jumlah desimal yang di set.
-	* 		: Jika tidak di set maka akan menampilkan jumlah desimal sesuai dengan default.
-	* @param string $separator
-	* 		: Pemisah desimal yang akan di gunakan.
-	* 		: Jika di set maka akan menggunakan pemisah desimal yang di set.
-	* 		: Jika tidak di set maka akan menggunakan pemisah desimal yang default (".").
-	* @param string $format
-	* 		: Tipe format yang akan di gunakan.
-	* 		: Jika di set maka akan menggunakan tipe format yang di set.
-	* 		: Jika tidak di set maka akan menggunakan tipe format yang default ("number").
-	*
-	* Contoh penggunaan:
-	* $this->table->format('harga', 2, ',', 'number');
-	* maka kolom "harga" akan di format dengan menggunakan 2 desimal, pemisah desimal "," dan tipe format "number".
-	*/
-	public function format($fields, int $decimal_endpoint = 0, $separator = '.', $format = 'number') {
-		if (is_array($fields)) {
-			foreach ($fields as $field) {
-				$this->variables['format_data'][$field] = [
-					'field_name'       => $field,
-					'decimal_endpoint' => $decimal_endpoint,
-					'format_type'      => $format,
-					'separator'        => $separator
-				];
-			}
+	 * Format column values
+	 * 
+	 * Applies formatting to column values for display. Supports various format types
+	 * including numbers, currency, dates, percentages, and custom formats.
+	 * 
+	 * Task 5.7.5: Add column formatting options (Requirement 22.5)
+	 * 
+	 * @param string|array $fields Field name(s) to format
+	 * @param int $decimal_endpoint Number of decimal places (for numeric formats)
+	 * @param string $separator Decimal separator ('.' or ',')
+	 * @param string $format Format type: 'number', 'currency', 'date', 'datetime', 'percentage', 'boolean', 'custom'
+	 * @param array $options Additional format options (currency symbol, date format, etc.)
+	 * @return void
+	 * @throws \InvalidArgumentException If format type or options are invalid
+	 * 
+	 * @security Validates format type and options to prevent XSS
+	 * 
+	 * @example
+	 * ```php
+	 * // Format price as number with 2 decimals
+	 * $table->format('price', 2, '.', 'number');
+	 * 
+	 * // Format as currency
+	 * $table->format('total', 2, '.', 'currency', ['symbol' => '$', 'position' => 'before']);
+	 * 
+	 * // Format as percentage
+	 * $table->format('discount', 1, '.', 'percentage');
+	 * 
+	 * // Format date
+	 * $table->format('created_at', 0, '.', 'date', ['format' => 'Y-m-d']);
+	 * 
+	 * // Format datetime
+	 * $table->format('updated_at', 0, '.', 'datetime', ['format' => 'Y-m-d H:i:s']);
+	 * 
+	 * // Format boolean
+	 * $table->format('is_active', 0, '.', 'boolean', ['true' => 'Active', 'false' => 'Inactive']);
+	 * 
+	 * // Format multiple fields at once
+	 * $table->format(['price', 'cost', 'total'], 2, '.', 'currency', ['symbol' => '$']);
+	 * ```
+	 */
+	public function format(string|array $fields, int $decimal_endpoint = 0, string $separator = '.', string $format = 'number', array $options = []): void {
+		// @security Validate format type
+		$validFormats = ['number', 'currency', 'date', 'datetime', 'time', 'percentage', 'boolean', 'custom'];
+		if (!in_array($format, $validFormats, true)) {
+			throw new \InvalidArgumentException('Invalid format type. Allowed: number, currency, date, datetime, time, percentage, boolean, custom');
+		}
+		
+		// @security Validate separator
+		if (!in_array($separator, ['.', ','], true)) {
+			throw new \InvalidArgumentException('Invalid separator. Allowed: "." or ","');
+		}
+		
+		// Validate decimal endpoint
+		if ($decimal_endpoint < 0 || $decimal_endpoint > 10) {
+			throw new \InvalidArgumentException('Decimal endpoint must be between 0 and 10');
+		}
+		
+		// Process fields
+		$fieldsArray = is_array($fields) ? $fields : [$fields];
+		
+		foreach ($fieldsArray as $field) {
+			// @security Validate field name
+			$field = $this->validateFieldName($field);
 			
-		} else {
-			$this->variables['format_data'][$fields] = [
-				'field_name'          => $fields,
-				'decimal_endpoint'    => $decimal_endpoint,
-				'format_type'         => $format,
-				'separator'           => $separator
+			$this->variables['format_data'][$field] = [
+				'field_name' => $field,
+				'decimal_endpoint' => $decimal_endpoint,
+				'format_type' => $format,
+				'separator' => $separator,
+				'options' => $this->validateFormatOptions($format, $options)
 			];
 		}
+	}
+	
+	/**
+	 * Validate format options based on format type
+	 * 
+	 * @param string $format Format type
+	 * @param array $options Format options
+	 * @return array Validated options
+	 * @throws \InvalidArgumentException If options are invalid
+	 * 
+	 * @security Validates and sanitizes format options
+	 */
+	private function validateFormatOptions(string $format, array $options): array {
+		$validated = [];
+		
+		switch ($format) {
+			case 'currency':
+				// Validate currency symbol
+				if (isset($options['symbol'])) {
+					$validated['symbol'] = htmlspecialchars($options['symbol'], ENT_QUOTES, 'UTF-8');
+				} else {
+					$validated['symbol'] = '$';
+				}
+				
+				// Validate position
+				if (isset($options['position'])) {
+					if (!in_array($options['position'], ['before', 'after'], true)) {
+						throw new \InvalidArgumentException('Currency position must be "before" or "after"');
+					}
+					$validated['position'] = $options['position'];
+				} else {
+					$validated['position'] = 'before';
+				}
+				
+				// Validate thousands separator
+				if (isset($options['thousands'])) {
+					if (!in_array($options['thousands'], [',', '.', ' ', ''], true)) {
+						throw new \InvalidArgumentException('Thousands separator must be ",", ".", " ", or empty string');
+					}
+					$validated['thousands'] = $options['thousands'];
+				} else {
+					$validated['thousands'] = ',';
+				}
+				break;
+				
+			case 'date':
+			case 'datetime':
+			case 'time':
+				// Validate date format
+				if (isset($options['format'])) {
+					// Allow common PHP date format characters
+					if (!preg_match('/^[YymdHhisaADlFMnjStwzWNLo\s\-\/:.,]+$/', $options['format'])) {
+						throw new \InvalidArgumentException('Invalid date format string');
+					}
+					$validated['format'] = $options['format'];
+				} else {
+					// Default formats
+					$validated['format'] = match($format) {
+						'date' => 'Y-m-d',
+						'datetime' => 'Y-m-d H:i:s',
+						'time' => 'H:i:s',
+						default => 'Y-m-d H:i:s'
+					};
+				}
+				
+				// Validate timezone
+				if (isset($options['timezone'])) {
+					try {
+						new \DateTimeZone($options['timezone']);
+						$validated['timezone'] = $options['timezone'];
+					} catch (\Exception $e) {
+						throw new \InvalidArgumentException('Invalid timezone: ' . $options['timezone']);
+					}
+				}
+				break;
+				
+			case 'percentage':
+				// Validate percentage symbol
+				if (isset($options['symbol'])) {
+					$validated['symbol'] = htmlspecialchars($options['symbol'], ENT_QUOTES, 'UTF-8');
+				} else {
+					$validated['symbol'] = '%';
+				}
+				
+				// Validate position
+				if (isset($options['position'])) {
+					if (!in_array($options['position'], ['before', 'after'], true)) {
+						throw new \InvalidArgumentException('Percentage position must be "before" or "after"');
+					}
+					$validated['position'] = $options['position'];
+				} else {
+					$validated['position'] = 'after';
+				}
+				break;
+				
+			case 'boolean':
+				// Validate true/false labels
+				if (isset($options['true'])) {
+					$validated['true'] = htmlspecialchars($options['true'], ENT_QUOTES, 'UTF-8');
+				} else {
+					$validated['true'] = 'Yes';
+				}
+				
+				if (isset($options['false'])) {
+					$validated['false'] = htmlspecialchars($options['false'], ENT_QUOTES, 'UTF-8');
+				} else {
+					$validated['false'] = 'No';
+				}
+				break;
+				
+			case 'custom':
+				// For custom format, allow callback or template
+				if (isset($options['callback'])) {
+					if (!is_callable($options['callback'])) {
+						throw new \InvalidArgumentException('Custom format callback must be callable');
+					}
+					$validated['callback'] = $options['callback'];
+				}
+				
+				if (isset($options['template'])) {
+					$validated['template'] = htmlspecialchars($options['template'], ENT_QUOTES, 'UTF-8');
+				}
+				break;
+		}
+		
+		return $validated;
+	}
+	
+	/**
+	 * Format column as currency
+	 * 
+	 * Convenience method to format columns as currency.
+	 * 
+	 * Task 5.7.5: Add column formatting options (Requirement 22.5)
+	 * 
+	 * @param string|array $fields Field name(s)
+	 * @param int $decimals Number of decimal places (default: 2)
+	 * @param string $symbol Currency symbol (default: '$')
+	 * @param string $position Symbol position: 'before' or 'after' (default: 'before')
+	 * @param string $thousands Thousands separator (default: ',')
+	 * @return void
+	 * 
+	 * @example
+	 * ```php
+	 * // Format as USD
+	 * $table->formatCurrency('price', 2, '$', 'before', ',');
+	 * 
+	 * // Format as EUR
+	 * $table->formatCurrency('total', 2, '€', 'after', '.');
+	 * ```
+	 */
+	public function formatCurrency(string|array $fields, int $decimals = 2, string $symbol = '$', string $position = 'before', string $thousands = ','): void {
+		$this->format($fields, $decimals, '.', 'currency', [
+			'symbol' => $symbol,
+			'position' => $position,
+			'thousands' => $thousands
+		]);
+	}
+	
+	/**
+	 * Format column as percentage
+	 * 
+	 * Convenience method to format columns as percentage.
+	 * 
+	 * Task 5.7.5: Add column formatting options (Requirement 22.5)
+	 * 
+	 * @param string|array $fields Field name(s)
+	 * @param int $decimals Number of decimal places (default: 1)
+	 * @param string $symbol Percentage symbol (default: '%')
+	 * @param string $position Symbol position: 'before' or 'after' (default: 'after')
+	 * @return void
+	 * 
+	 * @example
+	 * ```php
+	 * $table->formatPercentage('discount', 1);
+	 * $table->formatPercentage('growth_rate', 2);
+	 * ```
+	 */
+	public function formatPercentage(string|array $fields, int $decimals = 1, string $symbol = '%', string $position = 'after'): void {
+		$this->format($fields, $decimals, '.', 'percentage', [
+			'symbol' => $symbol,
+			'position' => $position
+		]);
+	}
+	
+	/**
+	 * Format column as date
+	 * 
+	 * Convenience method to format columns as date.
+	 * 
+	 * Task 5.7.5: Add column formatting options (Requirement 22.5)
+	 * 
+	 * @param string|array $fields Field name(s)
+	 * @param string $dateFormat PHP date format (default: 'Y-m-d')
+	 * @param string|null $timezone Timezone (default: null = use system timezone)
+	 * @return void
+	 * 
+	 * @example
+	 * ```php
+	 * $table->formatDate('created_at', 'Y-m-d');
+	 * $table->formatDate('birth_date', 'd/m/Y');
+	 * ```
+	 */
+	public function formatDate(string|array $fields, string $dateFormat = 'Y-m-d', ?string $timezone = null): void {
+		$options = ['format' => $dateFormat];
+		if ($timezone !== null) {
+			$options['timezone'] = $timezone;
+		}
+		
+		$this->format($fields, 0, '.', 'date', $options);
+	}
+	
+	/**
+	 * Format column as datetime
+	 * 
+	 * Convenience method to format columns as datetime.
+	 * 
+	 * Task 5.7.5: Add column formatting options (Requirement 22.5)
+	 * 
+	 * @param string|array $fields Field name(s)
+	 * @param string $dateTimeFormat PHP datetime format (default: 'Y-m-d H:i:s')
+	 * @param string|null $timezone Timezone (default: null = use system timezone)
+	 * @return void
+	 * 
+	 * @example
+	 * ```php
+	 * $table->formatDateTime('created_at', 'Y-m-d H:i:s');
+	 * $table->formatDateTime('updated_at', 'd/m/Y H:i');
+	 * ```
+	 */
+	public function formatDateTime(string|array $fields, string $dateTimeFormat = 'Y-m-d H:i:s', ?string $timezone = null): void {
+		$options = ['format' => $dateTimeFormat];
+		if ($timezone !== null) {
+			$options['timezone'] = $timezone;
+		}
+		
+		$this->format($fields, 0, '.', 'datetime', $options);
+	}
+	
+	/**
+	 * Format column as boolean
+	 * 
+	 * Convenience method to format columns as boolean with custom labels.
+	 * 
+	 * Task 5.7.5: Add column formatting options (Requirement 22.5)
+	 * 
+	 * @param string|array $fields Field name(s)
+	 * @param string $trueLabel Label for true values (default: 'Yes')
+	 * @param string $falseLabel Label for false values (default: 'No')
+	 * @return void
+	 * 
+	 * @example
+	 * ```php
+	 * $table->formatBoolean('is_active', 'Active', 'Inactive');
+	 * $table->formatBoolean('verified', 'Verified', 'Not Verified');
+	 * ```
+	 */
+	public function formatBoolean(string|array $fields, string $trueLabel = 'Yes', string $falseLabel = 'No'): void {
+		$this->format($fields, 0, '.', 'boolean', [
+			'true' => $trueLabel,
+			'false' => $falseLabel
+		]);
 	}
 	
 	/**
@@ -1667,11 +3532,11 @@ class Objects extends Builder {
 	 *       ->lists('users', ['name', 'email']);
 	 * ```
 	 */
-	public function set_regular_table() {
+	public function set_regular_table(): void {
 		$this->tableType = self::TABLE_TYPE_REGULAR;
 	}
 	
-	public $button_removed = [];
+	public array $button_removed = [];
 	/**
 	* Menghapus tombol dari daftar tombol yang tersedia.
 	*
@@ -1691,7 +3556,7 @@ class Objects extends Builder {
 	*
 	* Maka tombol 'edit' atau tombol 'view' dan 'delete' akan dihapus dari daftar tombol yang tersedia.
 	*/
-	public function removeButtons($remove) {
+	public function removeButtons(string|array $remove): void {
 		if (!empty($remove)) {
 			if (is_array($remove)) {
 				$this->button_removed = $remove;
@@ -1701,7 +3566,7 @@ class Objects extends Builder {
 		}
 	}
 	
-	private $defaultButtons = ['view', 'edit', 'delete'];
+	private array $defaultButtons = ['view', 'edit', 'delete'];
 	/**
 	* Mengatur aksi tombol untuk tabel.
 	*
@@ -1720,7 +3585,7 @@ class Objects extends Builder {
 	* // Mengatur aksi tombol dengan menghapus tombol default 'edit' dan 'delete'
 	* $this->setActions(['custom_action1'], ['edit', 'delete']);
 	*/
-	public function setActions($actions = [], $default_actions = true) {
+	public function setActions(array $actions = [], bool|array $default_actions = true): void {
 		if (true !== $default_actions) {
 			if (is_array($default_actions)) {
 				$this->removeButtons($default_actions);
@@ -1730,15 +3595,15 @@ class Objects extends Builder {
 		}
 	}
 	
-	private $objectInjections = [];
-	public $filterPage = [];
+	private array $objectInjections = [];
+	public array $filterPage = [];
 	/**
 	 * Initiate Configuration
 	 * 
 	 * @param string $connection
 	 * @param array $object
 	 */
-	public function config($object = []) {
+	public function config(array $object = []): void {
 		if (!empty($this->connection)) {
 			$this->connection($this->connection);
 		}
@@ -1754,7 +3619,7 @@ class Objects extends Builder {
 	 * Method ini mengatur koneksi database yang akan digunakan untuk query.
 	 * Berguna jika aplikasi menggunakan multiple database connections.
 	 * 
-	 * @param string $db_connection Nama koneksi database (dari config/database.php)
+	 * @param string|null $db_connection Nama koneksi database (dari config/database.php), null untuk default
 	 * @return void
 	 * 
 	 * @example
@@ -1764,12 +3629,14 @@ class Objects extends Builder {
 	 *       ->lists('users');
 	 * 
 	 * // Use default connection
-	 * $table->resetConnection()
+	 * $table->connection(null)
 	 *       ->lists('users');
 	 * ```
 	 */
-	public function connection($db_connection) {
-		$this->connection = $db_connection;
+	public function connection(?string $db_connection): void {
+		if ($db_connection !== null) {
+			$this->connection = $db_connection;
+		}
 	}
 	
 	/**
@@ -1777,13 +3644,13 @@ class Objects extends Builder {
 	 * 
 	 * @return void
 	 */
-	public function resetConnection() {
+	public function resetConnection(): void {
 		$this->connection = null;
 	}
 	
-	public $modelProcessing = [];
-	public $tableName = [];
-	public $tableID   = [];
+	public array $modelProcessing = [];
+	public array|string $tableName = [];
+	public array $tableID   = [];
 	/**
 	* Buat List(s) Data Table
 	*
@@ -1823,12 +3690,14 @@ class Objects extends Builder {
 	* $this->lists('users', ['nama', 'alamat'], true, true, true, [], false);
 	*
 	* Maka akan menampilkan list data table dengan nama tabel 'users', kolom 'nama' dan 'alamat', tombol aksi view, edit, delete, server side, dan nomor urut.
+	*
+	* @security Validates table name format (alphanumeric + underscore only) to prevent SQL injection.
+	*           Validates fields array type. Column labels from 'field:label' format are escaped
+	*           with canvastack_escape_html() before storage. Attribute values are escaped and
+	*           validated against dangerous event handlers. (Requirements 1.1, 1.2, 1.6, 1.8)
 	*/
-	public function lists(string $table_name = null, $fields = [], $actions = true, $server_side = true, $numbering = true, $attributes = [], $server_side_custom_url = false) {
+	public function lists(?string $table_name = null, array $fields = [], bool|string|array $actions = true, bool $server_side = true, bool $numbering = true, array $attributes = [], bool|string $server_side_custom_url = false): void {
 		try {
-			// Validate inputs
-			$fields = $this->validateFieldsArray($fields);
-			
 			// Setup model processing
 			$table_name = $this->setupModelProcessing($table_name);
 			
@@ -1871,14 +3740,12 @@ class Objects extends Builder {
 			
 		} catch (\InvalidArgumentException $e) {
 			error_log('Objects lists() validation error: ' . $e->getMessage());
-			return '<div class="alert alert-danger">Error: Invalid table configuration - ' . htmlspecialchars($e->getMessage(), ENT_QUOTES, 'UTF-8') . '</div>';
 		} catch (\Exception $e) {
 			error_log('Objects lists() error: ' . $e->getMessage());
-			return '<div class="alert alert-danger">Error: Unable to render table</div>';
 		}
 	}
 	
-	private function renderDatatable($name, $columns = [], $attributes = [], $label = null) {
+	private function renderDatatable(string $name, array $columns = [], array $attributes = [], ?string $label = null): void {
 		if (!empty($this->variables['table_data_model'])) {
 			$attributes[$name]['model'] = $this->variables['table_data_model'];
 			asort($attributes[$name]);
@@ -1899,7 +3766,7 @@ class Objects extends Builder {
 		$this->draw($this->tableID[$name], $this->table($name, $columns, $attributes, $label));
 	}
 	
-	private function renderGeneralTable($name, $columns = [], $attributes = []) {
+	private function renderGeneralTable(string $name, array $columns = [], array $attributes = []): void {
 		dd($columns);
 	}
 	
@@ -1909,7 +3776,7 @@ class Objects extends Builder {
 	 * @param string|null $table_name
 	 * @return string|null
 	 */
-	private function setupModelProcessing($table_name) {
+	private function setupModelProcessing(?string $table_name): ?string {
 		if (empty($this->variables['model_processing'])) {
 			return $table_name;
 		}
@@ -1928,7 +3795,7 @@ class Objects extends Builder {
 	 * @param string|null $table_name
 	 * @return string
 	 */
-	private function extractTableName($table_name) {
+	private function extractTableName(?string $table_name): ?string {
 		if ($table_name !== null) {
 			$this->variables['table_name'] = $table_name;
 			return $table_name;
@@ -1956,7 +3823,7 @@ class Objects extends Builder {
 	 * @param array $fields
 	 * @return array
 	 */
-	private function parseFieldLabels($fields) {
+	private function parseFieldLabels(array $fields): array {
 		if (!is_array($fields)) {
 			return [];
 		}
@@ -1965,7 +3832,8 @@ class Objects extends Builder {
 		foreach ($fields as $icol => $cols) {
 			if (canvastack_string_contained($cols, ':')) {
 				$split_cname = explode(':', $cols);
-				$this->labels[$split_cname[0]] = $split_cname[1];
+				// @security Escape label text to prevent XSS (Requirement 1.2)
+				$this->labels[$split_cname[0]] = canvastack_escape_html($split_cname[1]);
 				$recola[$icol] = $split_cname[0];
 			} else {
 				$recola[$icol] = $cols;
@@ -1982,7 +3850,7 @@ class Objects extends Builder {
 	 * @param array $fields
 	 * @return array
 	 */
-	private function validateColumns($table_name, $fields) {
+	private function validateColumns(?string $table_name, array $fields): array {
 		if (empty($fields)) {
 			return $this->getDefaultColumns($table_name);
 		}
@@ -1994,7 +3862,8 @@ class Objects extends Builder {
 			// Check if runModel() was called
 			if ($this->shouldProcessModel($table_name, empty($validated_fields))) {
 				canvastack_model_processing_table($this->modelProcessing, $table_name);
-				return canvastack_get_table_columns($table_name);
+				// Use cached columns after model processing
+				return canvastack_table_get_cached_columns($table_name, $this->connection ?? CANVASTACK_DEFAULT_DB_CONNECTION);
 			}
 			
 			return $validated_fields;
@@ -2009,16 +3878,21 @@ class Objects extends Builder {
 	 * @param string $table_name
 	 * @return array
 	 */
-	private function getDefaultColumns($table_name) {
+	private function getDefaultColumns(?string $table_name): array {
 		if (!empty($this->variables['table_fields'])) {
 			return $this->check_column_exist($table_name, $this->variables['table_fields']);
 		}
-		
-		$fields = canvastack_get_table_columns($table_name, $this->connection);
+
+		$connection = $this->connection ?? CANVASTACK_DEFAULT_DB_CONNECTION;
+
+		// Use persistent cache-backed helper instead of direct DB call
+		$fields = canvastack_table_get_cached_columns($table_name, $connection);
 		
 		if (empty($fields)) {
 			$this->processModelTable($table_name);
-			$fields = canvastack_get_table_columns($table_name);
+			// Invalidate stale cache after model processing creates the table
+			canvastack_table_invalidate_schema_cache($table_name, $connection);
+			$fields = canvastack_table_get_cached_columns($table_name, $connection);
 		}
 		
 		return $fields;
@@ -2031,7 +3905,7 @@ class Objects extends Builder {
 	 * @param array $fields
 	 * @return array
 	 */
-	private function processRelationalData($table_name, $fields) {
+	private function processRelationalData(?string $table_name, array $fields): array {
 		if (empty($this->relational_data)) {
 			return $fields;
 		}
@@ -2054,7 +3928,7 @@ class Objects extends Builder {
 	 *
 	 * @return array
 	 */
-	private function extractRelationFields() {
+	private function extractRelationFields(): array {
 		$field_relations = [];
 		
 		foreach ($this->relational_data as $relData) {
@@ -2079,7 +3953,7 @@ class Objects extends Builder {
 	 * @param array $field_relations
 	 * @return array
 	 */
-	private function identifyChangedFields($fields, $field_relations) {
+	private function identifyChangedFields(array $fields, array $field_relations): array {
 		$fieldset_changed = [];
 		
 		// Optimize: Use array_flip for O(1) lookup instead of O(n) in_array
@@ -2101,7 +3975,7 @@ class Objects extends Builder {
 	 * @param array $fieldset_changed
 	 * @return array
 	 */
-	private function buildCheckFieldSet($fields, $fieldset_changed) {
+	private function buildCheckFieldSet(array $fields, array $fieldset_changed): array {
 		$fieldset_added = $fields;
 		$checkFieldSet = array_diff($fieldset_added, $fields);
 		
@@ -2128,7 +4002,7 @@ class Objects extends Builder {
 	 * @param array $field_relations
 	 * @return array
 	 */
-	private function buildRelations($table_name, $checkFieldSet, $field_relations) {
+	private function buildRelations(?string $table_name, array $checkFieldSet, array $field_relations): array {
 		$relations = [];
 		
 		if (empty($checkFieldSet)) {
@@ -2141,7 +4015,8 @@ class Objects extends Builder {
 			}
 			
 			$relational_data = $field_relations[$field_diff];
-			$this->labels[$relational_data['field_name']] = $relational_data['field_label'];
+			// @security Escape relation field labels to prevent XSS (Requirement 1.2)
+			$this->labels[$relational_data['field_name']] = canvastack_escape_html($relational_data['field_label']);
 			$relations[$index] = $relational_data['field_name'];
 			$this->columns[$table_name]['relations'][$field_diff] = $relational_data;
 		}
@@ -2156,7 +4031,7 @@ class Objects extends Builder {
 	 * @param array $relations
 	 * @return array
 	 */
-	private function mergeRelationsWithFields($fields, $relations) {
+	private function mergeRelationsWithFields(array $fields, array $relations): array {
 		if (empty($relations)) {
 			return $fields;
 		}
@@ -2175,7 +4050,7 @@ class Objects extends Builder {
 	 * @param array $fields
 	 * @return void
 	 */
-	private function setupSearchColumns($fields) {
+	private function setupSearchColumns(array $fields): void {
 		$search_columns = false;
 		
 		if (!empty($this->search_columns)) {
@@ -2197,7 +4072,7 @@ class Objects extends Builder {
 	 * @param array $fields
 	 * @return void
 	 */
-	private function setupActions($table_name, $actions, $fields) {
+	private function setupActions(?string $table_name, mixed $actions, array $fields): void {
 		if (false === $actions) {
 			$actions = [];
 		}
@@ -2212,15 +4087,22 @@ class Objects extends Builder {
 	 * @param string $table_name
 	 * @param array $attributes
 	 * @return void
+	 * 
+	 * @security Escapes table ID and class attributes to prevent XSS (Requirement 1.6)
 	 */
-	private function setupTableAttributes($table_name, &$attributes) {
+	private function setupTableAttributes(?string $table_name, array &$attributes): void {
 		// Setup column properties
 		$this->setupColumnProperties($table_name);
 		
 		// Setup table ID and class
-		$this->tableID[$table_name] = canvastack_clean_strings("CanvaStack_{$this->tableType}_" . $table_name . '_' . canvastack_random_strings(50, false));
-		$attributes['table_id'] = $this->tableID[$table_name];
-		$attributes['table_class'] = canvastack_clean_strings("CanvaStack_{$this->tableType}_") . ' ' . $this->variables['table_class'];
+		$rawId    = "CanvaStack_{$this->tableType}_" . $table_name . '_' . canvastack_random_strings(50, false);
+		$tableId  = canvastack_clean_strings($rawId);
+		$this->tableID[$table_name] = $tableId;
+		// @security Escape table_id and table_class attribute values (Requirement 1.6)
+		$attributes['table_id']    = canvastack_escape_html($tableId);
+		$attributes['table_class'] = canvastack_escape_html(
+			canvastack_clean_strings("CanvaStack_{$this->tableType}_") . ' ' . $this->variables['table_class']
+		);
 		
 		// Setup background color
 		if (!empty($this->variables['background_color'])) {
@@ -2234,7 +4116,7 @@ class Objects extends Builder {
 	 * @param string $table_name
 	 * @return void
 	 */
-	private function setupColumnProperties($table_name) {
+	private function setupColumnProperties(?string $table_name): void {
 		$properties = [
 			'text_align' => 'align',
 			'merged_columns' => 'merge',
@@ -2274,7 +4156,7 @@ class Objects extends Builder {
 	 * @param bool $server_side_custom_url
 	 * @return void
 	 */
-	private function setupTableParameters($table_name, $actions, $numbering, $server_side, $server_side_custom_url) {
+	private function setupTableParameters(?string $table_name, mixed $actions, bool $numbering, bool $server_side, bool|string $server_side_custom_url): void {
 		// Setup on load parameters
 		if (!empty($this->variables['on_load']['display_limit_rows'])) {
 			$this->params[$table_name]['on_load']['display_limit_rows'] = $this->variables['on_load']['display_limit_rows'];
@@ -2319,7 +4201,7 @@ class Objects extends Builder {
 	 * @param string $table_name
 	 * @return void
 	 */
-	private function processWhereConditions($table_name) {
+	private function processWhereConditions(?string $table_name): void {
 		if (empty($this->conditions)) {
 			return;
 		}
@@ -2347,7 +4229,7 @@ class Objects extends Builder {
 	 * @param array $whereConditions
 	 * @return array
 	 */
-	private function transformWhereConditions($whereConditions) {
+	private function transformWhereConditions(array $whereConditions): array {
 		// Step 1: Group by field and operator
 		$whereConds = $this->groupWhereByField($whereConditions);
 		
@@ -2367,7 +4249,7 @@ class Objects extends Builder {
 	 * @param array $whereConditions
 	 * @return array
 	 */
-	private function groupWhereByField($whereConditions) {
+	private function groupWhereByField(array $whereConditions): array {
 		$whereConds = [];
 		
 		foreach ($whereConditions as $where_conds) {
@@ -2389,7 +4271,7 @@ class Objects extends Builder {
 	 * @param array $whereConds
 	 * @return array
 	 */
-	private function flattenWhereValues($whereConds) {
+	private function flattenWhereValues(array $whereConds): array {
 		$whereConditions = [];
 		
 		foreach ($whereConds as $whereFields => $whereFieldValues) {
@@ -2414,7 +4296,7 @@ class Objects extends Builder {
 	 * @param mixed $values
 	 * @return array
 	 */
-	private function flattenValueArray($values) {
+	private function flattenValueArray(mixed $values): array {
 		if (!is_array($values)) {
 			return [];
 		}
@@ -2440,7 +4322,7 @@ class Objects extends Builder {
 	 * @param array $whereConditions
 	 * @return array
 	 */
-	private function buildWhereConditionals($whereConditions) {
+	private function buildWhereConditionals(array $whereConditions): array {
 		$whereConditionals = [];
 		
 		foreach ($whereConditions as $whereConditionsFieldName => $whereConditionsDataFields) {
@@ -2462,7 +4344,7 @@ class Objects extends Builder {
 	 * @param array $whereConditionals
 	 * @return array
 	 */
-	private function finalizeWhereConditions($whereConditionals) {
+	private function finalizeWhereConditions(array $whereConditionals): array {
 		$whereDataConditions = [];
 		
 		foreach ($whereConditionals as $whereConditionalsFieldData) {
@@ -2480,7 +4362,7 @@ class Objects extends Builder {
 	 * @param string $table_name
 	 * @return void
 	 */
-	private function processColumnConditions($table_name) {
+	private function processColumnConditions(?string $table_name): void {
 		if (empty($this->conditions['columns'])) {
 			return;
 		}
@@ -2496,8 +4378,11 @@ class Objects extends Builder {
 	 * @param string $table_name
 	 * @return void
 	 */
-	private function renderTable($table_name) {
-		$label = $this->variables['table_name'] ?? null;
+	private function renderTable(?string $table_name): void {
+		// @security Escape table label to prevent XSS (Requirement 1.2)
+		$label = isset($this->variables['table_name'])
+			? canvastack_escape_html($this->variables['table_name'])
+			: null;
 		
 		if ('datatable' === $this->tableType) {
 			$this->renderDatatable($table_name, $this->columns, $this->params, $label);

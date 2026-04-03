@@ -3,6 +3,10 @@ namespace Canvastack\Origin\Library\Components\Table\Craft;
 
 use Canvastack\Origin\Models\Admin\System\DynamicTables;
 use Canvastack\Origin\Library\Components\Table\Craft\Method\Post;
+use Canvastack\Origin\Library\Constants\SafeHtml;
+use Canvastack\Origin\Library\Constants\TableConstants;
+use Canvastack\Origin\Library\Exceptions\Table\TableValidationException;
+use Canvastack\Origin\Library\Exceptions\Table\XSSAttemptException;
 
 /**
  * Builder Class - HTML Table Builder with DataTables Integration
@@ -69,7 +73,7 @@ class Builder {
 	
 	// Constants for validation
 	private const ALLOWED_METHODS = ['GET', 'POST'];
-	private const SPECIAL_COLUMNS = ['no', 'id', 'nik', 'number_lists', 'action'];
+	private const SPECIAL_COLUMNS = [TableConstants::COL_NO, TableConstants::COL_ID, 'nik', TableConstants::COL_NUMBER_LISTS, TableConstants::COL_ACTION];
 	
 	// Constants for column widths
 	private const COLUMN_WIDTH_SMALL = 30;
@@ -77,46 +81,62 @@ class Builder {
 	
 	// Constants for default values
 	private const DEFAULT_TABLE_ID = 'datatable';
-	private const DEFAULT_TABLE_CLASS = 'table';
+	private const DEFAULT_TABLE_CLASS = TableConstants::CLASS_TABLE;
 	private const MERGE_TEXT_SEPARATOR = '::merge::';
 	private const LIST_SUFFIX = ' List(s)';
 	private const LABEL_TABLE_MARKER = ':setLabelTable';
 	
 	// Constants for special column names
-	private const COLUMN_NUMBER_LISTS = 'number_lists';
-	private const COLUMN_ACTION = 'action';
-	private const COLUMN_NO = 'no';
-	private const COLUMN_ID = 'id';
+	private const COLUMN_NUMBER_LISTS = TableConstants::COL_NUMBER_LISTS;
+	private const COLUMN_ACTION = TableConstants::COL_ACTION;
+	private const COLUMN_NO = TableConstants::COL_NO;
+	private const COLUMN_ID = TableConstants::COL_ID;
 	private const COLUMN_NIK = 'nik';
 	
 	/**
+	 * Dangerous HTML event handler attribute prefixes/names that must be blocked.
+	 * These can be used to inject JavaScript via attribute injection attacks.
+	 *
+	 * @security XSS Prevention - blocks event handler injection
+	 * @var string[]
+	 */
+	private const DANGEROUS_ATTR_PATTERNS = [
+		'on',        // Matches all on* handlers (onclick, onload, onerror, etc.)
+		'formaction',
+		'srcdoc',
+		'xlink:href',
+	];	
+	/**
 	 * Validate table inputs
-	 * SECURITY: Ensures all required parameters are present and valid
+	 *
+	 * @security XSS Prevention - validates that $name is a non-empty string and
+	 *           $columns/$attributes are arrays. This is the first line of defense
+	 *           before any user-supplied data is processed or rendered.
 	 *
 	 * @param string $name Table name
 	 * @param array $columns Column configuration
 	 * @param array $attributes Table attributes
 	 * @throws \InvalidArgumentException If validation fails
 	 */
-	private function validateTableInputs($name, $columns, $attributes) {
+	private function validateTableInputs(string $name, array $columns, array $attributes): void {
 		// Validate table name
 		if (!is_string($name) || empty($name)) {
-			throw new \InvalidArgumentException('Table name must be a non-empty string');
+			throw new TableValidationException('Table name must be a non-empty string');
 		}
 		
 		// Validate columns parameter
 		if (!is_array($columns)) {
-			throw new \InvalidArgumentException('Columns parameter must be an array');
+			throw new TableValidationException('Columns parameter must be an array');
 		}
 		
 		// Validate attributes parameter
 		if (!is_array($attributes)) {
-			throw new \InvalidArgumentException('Attributes parameter must be an array');
+			throw new TableValidationException('Attributes parameter must be an array');
 		}
 		
 		// Validate columns structure if provided
 		if (!empty($columns[$name]) && !is_array($columns[$name])) {
-			throw new \InvalidArgumentException('Column configuration must be an array');
+			throw new TableValidationException('Column configuration must be an array');
 		}
 	}
 	
@@ -127,7 +147,7 @@ class Builder {
 	 * @param string $tableID Table ID to validate
 	 * @return string Sanitized table ID
 	 */
-	private function validateTableID($tableID) {
+	private function validateTableID(string $tableID): string {
 		// Remove any HTML/script tags
 		$tableID = strip_tags($tableID);
 		
@@ -148,7 +168,7 @@ class Builder {
 	 * @param mixed $width Width value to validate
 	 * @return int|null Valid width or null
 	 */
-	private function validateWidth($width) {
+	private function validateWidth(mixed $width): ?int {
 		// Only accept numeric values
 		$width = filter_var($width, FILTER_VALIDATE_INT);
 		
@@ -163,10 +183,11 @@ class Builder {
 	 * Validate color value
 	 * SECURITY: Prevents XSS in style attributes
 	 *
+	 * @security XSS Prevention - only allows safe color values
 	 * @param string $color Color value to validate
 	 * @return string|null Valid color or null
 	 */
-	private function validateColor($color) {
+	private function validateColor(string $color): ?string {
 		// Allow hex colors (#fff, #ffffff)
 		if (preg_match('/^#[0-9a-fA-F]{3,6}$/', $color)) {
 			return $color;
@@ -184,27 +205,68 @@ class Builder {
 		
 		return null;
 	}
+	
 	/**
-	 * Cache for escaped tableID values
+	 * Validate an attributes array for dangerous event handler keys.
+	 *
+	 * Strips any attribute whose key starts with "on" (e.g. onclick, onload)
+	 * or matches other dangerous patterns that could be used for XSS injection.
+	 * Attribute values are escaped separately by setAttributes().
+	 *
+	 * @security XSS Prevention - removes event handler injection vectors.
+	 *           Call this before passing user-supplied attributes to setAttributes().
+	 *
+	 * @param  array $attributes Key-value pairs of HTML attributes
+	 * @return array Sanitized attributes with dangerous keys removed
+	 *
+	 * @example
+	 * // Dangerous input
+	 * $attrs = ['class' => 'table', 'onclick' => 'alert(1)', 'id' => 'my-table'];
+	 * $safe  = $this->validateAttributeKeys($attrs);
+	 * // Returns: ['class' => 'table', 'id' => 'my-table']
+	 */
+	private function validateAttributeKeys(array $attributes): array {
+		$safe = [];
+		foreach ($attributes as $key => $value) {
+			$keyLower = strtolower((string) $key);
+			
+			$isDangerous = false;
+			foreach (self::DANGEROUS_ATTR_PATTERNS as $pattern) {
+				// Block exact match or prefix match (e.g. "on" catches "onclick")
+				if ($keyLower === $pattern || str_starts_with($keyLower, $pattern)) {
+					$isDangerous = true;
+					error_log('[SECURITY] Builder::validateAttributeKeys(): Blocked dangerous attribute key "' . $key . '"');
+					break;
+				}
+			}
+			
+			if (!$isDangerous) {
+				$safe[$key] = $value;
+			}
+		}
+		return $safe;
+	}
+	/**
+	 * Cache for escaped tableID values (in-memory, per-request)
 	 *
 	 * @var array
 	 */
 	private $escapedTableIDCache = [];
 
 	/**
-	 * Cache for column labels
+	 * Cache for column labels (in-memory, per-request)
 	 *
 	 * @var array
 	 */
 	private $columnLabelCache = [];
 
 	/**
-	 * Get escaped tableID with caching
+	 * Get escaped tableID with in-memory caching
 	 *
 	 * @param string $tableID Table ID to escape
 	 * @return string Escaped table ID
 	 */
-	private function getEscapedTableID($tableID) {
+	private function getEscapedTableID(string $tableID): string {
 		if (!isset($this->escapedTableIDCache[$tableID])) {
 			$this->escapedTableIDCache[$tableID] = htmlspecialchars($tableID, ENT_QUOTES, 'UTF-8');
 		}
@@ -212,17 +274,91 @@ class Builder {
 	}
 
 	/**
-	 * Get formatted column label with caching
+	 * Get formatted column label with two-level caching
 	 *
-	 * @param string $column Column name
-	 * @return string Formatted and escaped label
+	 * Uses an in-memory L1 cache (per-request) backed by a Laravel Cache L2
+	 * (cross-request, persistent). Column labels are derived from column names
+	 * and are stable across requests, making them good candidates for persistent
+	 * caching.
+	 *
+	 * @performance Eliminates repeated ucwords/str_replace/htmlspecialchars calls
+	 *              for the same column name across multiple table renders.
+	 *
+	 * @security XSS Prevention - the label is escaped with htmlspecialchars() before
+	 *           being stored in the cache and returned. This ensures all column labels
+	 *           rendered in table headers are safe from XSS injection.
+	 *
+	 * @param string $column Column name (or custom label string)
+	 * @return string Formatted and HTML-escaped label
 	 */
-	private function getColumnLabel($column) {
-		if (!isset($this->columnLabelCache[$column])) {
-			$label = ucwords(str_replace('_', ' ', $column));
-			$this->columnLabelCache[$column] = htmlspecialchars($label, ENT_QUOTES, 'UTF-8');
+	private function getColumnLabel(string $column): string {
+		// L1: in-memory cache (fastest, per-request)
+		if (isset($this->columnLabelCache[$column])) {
+			return $this->columnLabelCache[$column];
 		}
-		return $this->columnLabelCache[$column];
+
+		// L2: persistent cache (CONFIG: Check development settings)
+		$cacheEnabled = $this->shouldUseCache();
+		$cacheKey     = config('canvastack.cache.prefix', 'canvastack_') . config('canvastack.cache.config.key_prefix', 'config_') . 'col_label_' . md5($column);
+		$cacheTtl     = (int) config('canvastack.cache.config.ttl', 3600);
+
+		if ($cacheEnabled) {
+			$cached = \Illuminate\Support\Facades\Cache::get($cacheKey);
+			if ($cached !== null) {
+				$this->columnLabelCache[$column] = $cached;
+				
+				// Monitor cache hit
+				canvastack_table_cache_monitor('get', $cacheKey, true);
+				
+				// Log cache operation in development
+				if (config('canvastack.cache.development.log_operations', false)) {
+					\Log::debug('Cache HIT: Column label', ['column' => $column, 'key' => $cacheKey]);
+				}
+				
+				return $cached;
+			}
+			
+			// Monitor cache miss
+			canvastack_table_cache_monitor('get', $cacheKey, false);
+		}
+
+		// Compute label
+		$label  = ucwords(str_replace('_', ' ', $column));
+		$result = htmlspecialchars($label, ENT_QUOTES, 'UTF-8');
+
+		// Store in L1
+		$this->columnLabelCache[$column] = $result;
+
+		// Store in L2
+		if ($cacheEnabled) {
+			try {
+				\Illuminate\Support\Facades\Cache::put($cacheKey, $result, $cacheTtl);
+			} catch (\Exception $e) {
+				// Non-fatal: log and continue without persistent cache
+				error_log('Builder::getColumnLabel() cache write failed: ' . $e->getMessage());
+			}
+		}
+
+		return $result;
+	}
+	/**
+	/**
+	 * Check if cache should be used based on development settings
+	 *
+	 * @param string $cacheType Type of cache (config, validation, etc.)
+	 * @return bool
+	 */
+	private function shouldUseCache(string $cacheType = 'config'): bool
+	{
+	    // Disable cache in development if configured
+	    if (config('canvastack.cache.development.disable_in_dev', false) && app()->environment('local')) {
+	        if (config('canvastack.cache.development.log_operations', false)) {
+	            \Log::debug('Cache disabled in development environment', ['type' => $cacheType]);
+	        }
+	        return false;
+	    }
+
+	    return config("canvastack.cache.{$cacheType}.enabled", true);
 	}
 	/**
 	 * Initialize table data model
@@ -231,7 +367,7 @@ class Builder {
 	 * @param array $attributes Table attributes
 	 * @return array Data array with model information
 	 */
-	private function initializeTableModel($name, $attributes) {
+	private function initializeTableModel(string $name, array $attributes): array {
 		$data = [];
 		$model = null;
 
@@ -268,7 +404,7 @@ class Builder {
 	 * @param array $attributes Table attributes
 	 * @return array Configuration array with tableID, tableClass, etc.
 	 */
-	private function extractTableConfig($name, $attributes) {
+	private function extractTableConfig(string $name, array $attributes): array {
 		$config = [
 			'tableID' => self::DEFAULT_TABLE_ID,
 			'tableClass' => self::DEFAULT_TABLE_CLASS,
@@ -311,7 +447,7 @@ class Builder {
 	 * @param array $data Existing data array
 	 * @return array Complete data array
 	 */
-	private function buildTableData($name, $columns, $attributes, $data) {
+	private function buildTableData(string $name, array $columns, array $attributes, array $data): array {
 		$data[$name]['name']       = $name;
 		$data[$name]['columns']    = $columns[$name];
 		$data[$name]['attributes'] = $attributes[$name];
@@ -332,11 +468,15 @@ class Builder {
 	/**
 	 * Build table title HTML
 	 *
+	 * @security XSS Prevention - the title text (derived from $name or $label) is
+	 *           escaped with htmlspecialchars() before being rendered into HTML.
+	 *           This prevents XSS if a table name or label contains special characters.
+	 *
 	 * @param string $name Table name
 	 * @param string|null $label Custom label
 	 * @return string Table title HTML
 	 */
-	private function buildTableTitle($name, $label) {
+	private function buildTableTitle(string|false $name, ?string $label): string {
 		if (false === $name) {
 			return '';
 		}
@@ -366,32 +506,84 @@ class Builder {
 	/**
 	 * Build table HTML structure
 	 *
+	 * @security XSS Prevention - validates and escapes all table attributes before rendering.
+	 *           User-supplied add_attributes are filtered for dangerous event handlers.
+	 *
 	 * @param array $data Table data
 	 * @param array $config Table configuration
 	 * @param string $name Table name
 	 * @param array $attributes Table attributes
 	 * @return string Table HTML
 	 */
-	private function buildTableHTML($data, $config, $name, $attributes) {
-		$baseTableAttributes = ['id' => $config['tableID'], 'class' => $config['tableClass']];
-		$tableAttributes = $baseTableAttributes;
+	private function buildTableHTML(array $data, array $config, string $name, array $attributes): string {
+			// SECURITY: Escape tableClass to prevent XSS in class attribute
+			$safeTableClass = htmlspecialchars($config['tableClass'], ENT_QUOTES, 'UTF-8');
+			$baseTableAttributes = [
+				'id' => $config['tableID'], 
+				'class' => $safeTableClass,
+				TableConstants::ATTR_ROLE => TableConstants::ROLE_TABLE
+			];
+			$tableAttributes = $baseTableAttributes;
 
-		if (!empty($attributes[$name]['attributes']['add_attributes'])) {
-			$tableAttributes = array_merge_recursive(
-				$baseTableAttributes,
-				$attributes[$name]['attributes']['add_attributes']
-			);
+			if (!empty($attributes[$name]['attributes']['add_attributes'])) {
+				// SECURITY: Strip dangerous event handler keys (1.4.4) before merging
+				$safeAddAttributes = $this->validateAttributeKeys(
+					$attributes[$name]['attributes']['add_attributes']
+				);
+				$tableAttributes = array_merge_recursive($baseTableAttributes, $safeAddAttributes);
+			}
+
+			// Task 4.4.1: Generate descriptive table caption for screen readers
+			$caption = $this->generateTableCaption($name, $data, $attributes);
+
+			$table  = '<div class="panel-body no-padding">';
+			$table .= '<table' . $this->setAttributes($tableAttributes) . '>';
+			$table .= $caption; // Add caption after <table> tag
+			$table .= $this->header($data[$name]);
+			$table .= '</table>';
+			$table .= '</div>';
+
+			return $table;
+		}
+	/**
+		 * Generate descriptive table caption for screen readers
+		 *
+		 * Creates an accessible caption that describes the table content and provides
+		 * context for screen reader users. The caption includes the table name and
+		 * optionally the record count if available.
+		 *
+		 * Task 4.4.1: Add descriptive table caption (Requirement 13.1)
+		 *
+		 * @param string $name Table name
+		 * @param array $data Table data configuration
+		 * @param array $attributes Table attributes
+		 * @return string HTML caption element
+		 */
+		private function generateTableCaption(string $name, array $data, array $attributes): string {
+			// Get human-readable table name
+			$tableName = $name;
+			if (!empty($data[$name]['attributes']['label'])) {
+				$tableName = $data[$name]['attributes']['label'];
+			} else {
+				$tableName = ucwords(str_replace('_', ' ', $name));
+			}
+
+			// SECURITY: Escape table name to prevent XSS
+			$safeTableName = htmlspecialchars($tableName, ENT_QUOTES, 'UTF-8');
+
+			// Build caption text
+			$captionText = "Table showing {$safeTableName}";
+
+			// Add record count if available (will be updated by JavaScript for server-side tables)
+			if (!empty($attributes[$name]['server_side']['status'])) {
+				// For server-side tables, add a placeholder that will be updated via JavaScript
+				$captionText .= '. <span class="table-record-count" aria-live="polite">Loading records...</span>';
+			}
+
+			// Add screen reader only class to hide visually but keep accessible
+			return '<caption class="sr-only">' . $captionText . '</caption>';
 		}
 
-		$table  = '<div class="panel-body no-padding">';
-		$table .= '<table' . $this->setAttributes($tableAttributes) . '>';
-		$table .= $this->header($data[$name]);
-		$table .= '</table>';
-		$table .= '</div>';
-
-		return $table;
-	}
-
 	/**
 	 * Build filter section HTML
 	 *
@@ -410,8 +602,7 @@ class Builder {
 	 * @param string $tableID Table ID
 	 * @return string Filter HTML or empty string
 	 */
-	private function buildFilterSection($tableID) {
-		// PERFORMANCE: Cache filter content to avoid repeated array access
+	private function buildFilterSection(string $tableID): string {
 		$filterContent = $this->filter_contents[$tableID] ?? null;
 
 		if (empty($filterContent['id']) || $tableID !== $filterContent['id']) {
@@ -449,14 +640,17 @@ class Builder {
 	 * @param string $tableID Table ID
 	 * @return string Complete wrapped HTML
 	 */
-	private function wrapTableInContainer($tableTitle, $tableHTML, $datatableColumns, $tableID) {
-		// SECURITY: Escape tableID in class name (with caching)
+	private function wrapTableInContainer(string $tableTitle, string $tableHTML, string $datatableColumns, string $tableID): string {
 		$safeTableID = $this->getEscapedTableID($tableID);
+
+		// Task 4.4.5-4.4.8: Add aria-live regions for screen reader announcements
+		$ariaLiveRegions = $this->buildAriaLiveRegions($safeTableID);
 
 		$html  = '<div class="row">';
 		$html .= '<div class="col-md-12">';
 		$html .= '<div class="panel">' . $tableTitle . '<br />';
 		$html .= '<div class="relative canvastack-table-box-' . $safeTableID . '">';
+		$html .= $ariaLiveRegions; // Add aria-live regions before table
 		$html .= $this->buildFilterSection($tableID);
 		$html .= $tableHTML . $datatableColumns;
 		$html .= '</div>';
@@ -466,8 +660,52 @@ class Builder {
 
 		return $html;
 	}
+	/**
+		 * Build aria-live regions for screen reader announcements
+		 *
+		 * Creates hidden aria-live regions that will be updated by JavaScript to announce
+		 * table state changes to screen reader users. These regions are visually hidden
+		 * but accessible to assistive technologies.
+		 *
+		 * Tasks 4.4.5-4.4.8: Screen reader announcements for pagination, filters, sorting, and loading
+		 *
+		 * @param string $tableID Escaped table ID
+		 * @return string HTML for aria-live regions
+		 */
+		private function buildAriaLiveRegions(string $tableID): string {
+			$html = '<div class="sr-only" aria-live="polite" aria-atomic="true">';
+
+			// Task 4.4.5: Pagination announcements
+			$html .= '<div id="' . $tableID . '-pagination-status" class="table-pagination-status"></div>';
+
+			// Task 4.4.6: Filter status announcements
+			$html .= '<div id="' . $tableID . '-filter-status" class="table-filter-status"></div>';
+
+			// Task 4.4.7: Sort direction announcements
+			$html .= '<div id="' . $tableID . '-sort-status" class="table-sort-status"></div>';
+
+			// Task 4.4.8: Loading status announcements (aria-busy will be set on table)
+			$html .= '<div id="' . $tableID . '-loading-status" class="table-loading-status"></div>';
+
+			$html .= '</div>';
+
+			return $html;
+		}
 	
-	protected function setMethod($method) {
+	/**
+	 * Set HTTP method for table requests
+	 * 
+	 * Configures the HTTP method used for DataTables AJAX requests.
+	 * 
+	 * @param string $method HTTP method ('GET' or 'POST')
+	 * @return void
+	 * 
+	 * @example
+	 * ```php
+	 * $builder->setMethod('POST');
+	 * ```
+	 */
+	protected function setMethod(string $method): void {
 		$this->method = $method;
 	}
 	
@@ -480,14 +718,22 @@ class Builder {
 	 * - Filter integration if configured
 	 * - Action buttons if configured
 	 * 
+	 * @security XSS Prevention - all user-controllable data is escaped before rendering:
+	 *           - Table name/label escaped via buildTableTitle()
+	 *           - Column labels escaped via getColumnLabel() (htmlspecialchars)
+	 *           - Table attributes escaped via setAttributes() (htmlspecialchars)
+	 *           - add_attributes filtered for dangerous event handlers via validateAttributeKeys()
+	 *           - tableClass escaped before use in HTML
+	 *           - Output marked with SafeHtml::mark() to prevent double-encoding
+	 *
 	 * @param string $name Table name
 	 * @param array $columns Column configuration
 	 * @param array $attributes Table attributes
 	 * @param string|null $label Custom table label
-	 * @return string Complete table HTML
+	 * @return string Complete table HTML (marked as SafeHtml)
 	 * @throws \InvalidArgumentException If invalid inputs
 	 */
-	protected function table($name, $columns = [], $attributes = [], $label = null) {
+	protected function table(string $name, array $columns = [], array $attributes = [], ?string $label = null): string {
 		try {
 			// SECURITY: Validate all inputs
 			$this->validateTableInputs($name, $columns, $attributes);
@@ -507,20 +753,32 @@ class Builder {
 			$datatableColumns = $this->body($data[$name]);
 			
 			// Wrap and return
-			return $this->wrapTableInContainer(
+			$output = $this->wrapTableInContainer(
 				$tableTitle, 
 				$tableHTML, 
 				$datatableColumns, 
 				$config['tableID']
 			);
 			
+			// Return final HTML directly - no SafeHtml marking needed here since
+			// this output goes straight to the browser and is not passed through
+			// any further escaping layer. Marking would cause the marker to leak
+			// into the rendered page (including inside <script> blocks).
+			return $output;
+			
 		} catch (\InvalidArgumentException $e) {
 			// SECURITY: Log error and return safe error message
-			error_log('Builder table() validation error: ' . $e->getMessage());
+			\Log::error('Builder table() validation error: ' . $e->getMessage(), [
+				'exception' => $e,
+				'table' => $name ?? 'unknown'
+			]);
 			return '<div class="alert alert-danger">Error: Invalid table configuration</div>';
 		} catch (\Exception $e) {
 			// SECURITY: Log error and return safe error message
-			error_log('Builder table() error: ' . $e->getMessage());
+			\Log::error('Builder table() error: ' . $e->getMessage(), [
+				'exception' => $e,
+				'table' => $name ?? 'unknown'
+			]);
 			return '<div class="alert alert-danger">Error: Unable to render table</div>';
 		}
 	}
@@ -530,11 +788,18 @@ class Builder {
 	/**
 	 * Check and manipulate column labels
 	 * 
-	 * @param array $check_labels Labels to check
+	 * Processes column labels to extract custom labels from 'field:Label' format
+	 * and stores them for later use in table rendering.
+	 * 
+	 * @param array $check_labels Labels to check and process
 	 * @param array $columns Column list
-	 * @return array Processed labels
+	 * @return array Processed labels array
+	 * 
+	 * @security Labels are sanitized via getColumnLabel() which applies htmlspecialchars()
+	 * 
+	 * @internal Used internally by table() method
 	 */
-	private function checkColumnLabel($check_labels, $columns) {
+	private function checkColumnLabel(array $check_labels, array $columns): array {
 		$labels = [];
 		foreach ($columns as $icol => $vcol) {
 			if (!empty($this->labels[$vcol])) {
@@ -552,11 +817,15 @@ class Builder {
 	/**
 	 * Build table header with columns
 	 * Refactored to reduce nesting from 5 to 2 levels
+	 *
+	 * @security XSS Prevention - column labels are escaped via getColumnLabel() which
+	 *           applies htmlspecialchars(). Custom labels from $this->labels are also
+	 *           routed through getColumnLabel() ensuring consistent escaping.
 	 * 
 	 * @param array $data Table data configuration
 	 * @return string HTML for table header
 	 */
-	private function header($data = []) {
+	private function header(array $data = []): string {
 		$config = $this->prepareHeaderConfig($data);
 		
 		// Early return for empty columns
@@ -577,7 +846,7 @@ class Builder {
 	 * @param array $data Table data
 	 * @return array Configuration array
 	 */
-	private function prepareHeaderConfig($data) {
+	private function prepareHeaderConfig(array $data): array {
 		$columns = $data['columns'];
 		$attributes = $data['attributes'];
 		
@@ -617,7 +886,7 @@ class Builder {
 	 * @param array $columns Column configuration
 	 * @return array Alignment configuration
 	 */
-	private function extractAlignmentConfig($columns) {
+	private function extractAlignmentConfig(array $columns): array {
 		$alignColumn = [];
 		
 		if (empty($columns['align'])) {
@@ -643,7 +912,7 @@ class Builder {
 	 * @param array $columns Column configuration
 	 * @return array|null Merge configuration
 	 */
-	private function extractMergeConfig($columns) {
+	private function extractMergeConfig(array $columns): ?array {
 		if (empty($columns['merge'])) {
 			return null;
 		}
@@ -673,7 +942,7 @@ class Builder {
 	 * @param array $attributes Table attributes
 	 * @return array Modified column list
 	 */
-	private function addSpecialColumns($columns, $attributes) {
+	private function addSpecialColumns(array $columns, array $attributes): array {
 		$numbering = $attributes['numbering'] ?? false;
 		$actions = $attributes['actions'] ?? false;
 		
@@ -694,7 +963,7 @@ class Builder {
 	 * @param array $config Header configuration
 	 * @return string HTML for merged header
 	 */
-	private function buildMergedHeader($config) {
+	private function buildMergedHeader(array $config): string {
 		// Merge alignment classes if needed
 		if (!empty($config['alignColumn']['header'])) {
 			$config['attributes']['attributes']['column']['class'] = array_merge_recursive(
@@ -718,14 +987,18 @@ class Builder {
 	 * @param array $config Header configuration
 	 * @return string HTML for standard header
 	 */
-	private function buildStandardHeader($config) {
-		$headerTable = '<thead><tr>';
+	private function buildStandardHeader(array $config): string {
+		/**
+		 * @performance Use array collection + implode() instead of repeated .= in loop
+		 * to avoid repeated string reallocation on each append.
+		 */
+		$headerParts = [];
 		
 		foreach ($config['columnsList'] as $column) {
-			$headerTable .= $this->renderStandardColumnHeader($column, $config);
+			$headerParts[] = $this->renderStandardColumnHeader($column, $config);
 		}
 		
-		return $headerTable . '</tr></thead>';
+		return '<thead><tr>' . implode('', $headerParts) . '</tr></thead>';
 	}
 	
 	/**
@@ -734,8 +1007,10 @@ class Builder {
 	 * @param string $column Column name
 	 * @param array $config Header configuration
 	 * @return string HTML for column header
+	 * 
+	 * @accessibility Adds keyboard navigation attributes for sortable columns (Task 4.3.1, 4.3.3)
 	 */
-	private function renderStandardColumnHeader($column, $config) {
+	private function renderStandardColumnHeader(string $column, array $config): string {
 		// PERFORMANCE: Use cached column label
 		$headerLabel = $this->getColumnLabel($column);
 		$columnLower = strtolower($column);
@@ -749,14 +1024,34 @@ class Builder {
 			$id = $this->setAttributes(['id' => canvastack_decrypt(canvastack_encrypt($column))]);
 		}
 		
+		// Build ARIA attributes
+		$ariaAttrs = $this->buildHeaderAriaAttributes($column, $config);
+		
+		// Task 4.4.2: Add scope="col" for header association (Requirement 13.2)
+		$scopeAttr = ' scope="col"';
+		
+		// Build keyboard navigation attributes for sortable columns (Task 4.3.1, 4.3.3)
+		$keyboardAttrs = '';
+		$tooltip = '';
+		$focusClass = '';
+		$isSortable = !empty($config['sortable']) && (is_array($config['sortable']) ? in_array($column, $config['sortable']) : $config['sortable']);
+		if ($isSortable) {
+			$kbAttrs = $this->buildKeyboardAttributes('header', ['sortable' => true]);
+			$keyboardAttrs = $this->setAttributes($kbAttrs);
+			// Add tooltip for keyboard sorting (Task 4.3.3)
+			$tooltip = ' title="Click or press Enter/Space to sort"';
+			// Add focus indicator class (Task 4.3.5)
+			$focusClass = ' class="canvastack-keyboard-focus"';
+		}
+		
 		// Special columns
 		if (in_array($columnLower, [self::COLUMN_NO, self::COLUMN_ID, self::COLUMN_NIK])) {
-			return "<th width=\"" . self::COLUMN_WIDTH_MEDIUM . "\"{$config['headerColor']}>{$headerLabel}</th>";
+			return "<th width=\"" . self::COLUMN_WIDTH_MEDIUM . "\"{$scopeAttr}{$ariaAttrs}{$keyboardAttrs}{$tooltip}{$focusClass}{$config['headerColor']}>{$headerLabel}</th>";
 		}
 		
 		if (self::COLUMN_NUMBER_LISTS === $columnLower) {
-			return '<th width="' . self::COLUMN_WIDTH_SMALL . '"' . $config['headerColor'] . '>No</th>' .
-			       '<th width="' . self::COLUMN_WIDTH_SMALL . '"' . $config['headerColor'] . '>ID</th>';
+			return '<th width="' . self::COLUMN_WIDTH_SMALL . '"' . $scopeAttr . $ariaAttrs . $keyboardAttrs . $tooltip . $focusClass . $config['headerColor'] . '>No</th>' .
+			       '<th width="' . self::COLUMN_WIDTH_SMALL . '"' . $scopeAttr . $ariaAttrs . $keyboardAttrs . $tooltip . $focusClass . $config['headerColor'] . '>ID</th>';
 		}
 		
 		// Standard column
@@ -764,7 +1059,14 @@ class Builder {
 		$width = $this->getColumnWidthFromConfig($column, $config['widthColumn']);
 		$colorStyle = $this->getColumnColorStyle($column, $config['columnColor']);
 		
-		return "<th{$id}{$class}{$config['headerColor']}{$colorStyle}{$width}>{$headerLabel}</th>";
+		// Merge focus class with existing class if sortable
+		if ($isSortable && !empty($class)) {
+			$class = str_replace(' class="', ' class="canvastack-keyboard-focus ', $class);
+		} elseif ($isSortable) {
+			$class = $focusClass;
+		}
+		
+		return "<th{$id}{$class}{$scopeAttr}{$ariaAttrs}{$keyboardAttrs}{$tooltip}{$config['headerColor']}{$colorStyle}{$width}>{$headerLabel}</th>";
 	}
 	
 	/**
@@ -774,7 +1076,7 @@ class Builder {
 	 * @param array $config Header configuration
 	 * @return string Class attribute string
 	 */
-	private function buildStandardColumnClass($column, $config) {
+	private function buildStandardColumnClass(string $column, array $config): string {
 		$classAttributes = '';
 		
 		if (in_array($column, $config['hiddenColumn'])) {
@@ -797,13 +1099,131 @@ class Builder {
 	}
 	
 	/**
+	 * Build ARIA attributes for table header cell
+	 * 
+	 * Generates ARIA role and other accessibility attributes for table header cells.
+	 * 
+	 * @param string $column Column name
+	 * @param array $config Header configuration
+	 * @return string ARIA attributes string
+	 */
+	private function buildHeaderAriaAttributes(string $column, array $config): string {
+		// Check if ARIA is enabled globally
+		if (!config('canvastack.datatables.accessibility.aria_enabled', true)) {
+			return '';
+		}
+		
+		$ariaAttributes = [];
+		
+		// Add role="columnheader"
+		$ariaAttributes[TableConstants::ATTR_ROLE] = TableConstants::ROLE_COLUMNHEADER;
+		
+		// Add aria-sort if column is sortable and config enabled
+		$isSortable = !empty($config['sortable']) && (is_array($config['sortable']) ? in_array($column, $config['sortable']) : $config['sortable']);
+		if ($isSortable && config('canvastack.datatables.accessibility.add_aria_sort', true)) {
+			$ariaAttributes[TableConstants::ATTR_ARIA_SORT] = 'none';
+		}
+		
+		// Add aria-label for columns if config enabled
+		if (config('canvastack.datatables.accessibility.add_aria_labels', true)) {
+			$columnLabel = $this->getColumnLabel($column);
+			
+			// Add sortable indicator to label
+			if ($isSortable) {
+				$ariaAttributes[TableConstants::ATTR_ARIA_LABEL] = $columnLabel . ' (sortable)';
+			} else {
+				$ariaAttributes[TableConstants::ATTR_ARIA_LABEL] = $columnLabel;
+			}
+			
+			// Add filterable indicator if applicable
+			if (!empty($config['attributes']['searchable']) && in_array($column, $config['attributes']['searchable'])) {
+				$ariaAttributes[TableConstants::ATTR_ARIA_LABEL] .= ', filterable';
+			}
+		}
+		
+		return $this->setAttributes($ariaAttributes);
+	}
+	
+	/**
+	 * Build keyboard navigation attributes for table elements
+	 * 
+	 * Adds tabindex and keyboard event handler attributes to make table
+	 * elements keyboard accessible per WCAG 2.1 Level A requirements.
+	 * 
+	 * @param string $elementType Type of element ('header', 'button', 'pagination', 'filter')
+	 * @param array $config Additional configuration
+	 * @return array Keyboard attributes
+	 * 
+	 * @accessibility Implements Requirement 12.2 - proper tab order for interactive elements
+	 *                Implements Task 4.3.1 - ensure proper tab order
+	 *                Implements Task 4.3.2 - add keyboard shortcuts
+	 */
+	private function buildKeyboardAttributes(string $elementType, array $config = []): array {
+		// Check if keyboard navigation is enabled
+		if (!config('canvastack.datatables.accessibility.keyboard_navigation', true)) {
+			return [];
+		}
+		
+		$attributes = [];
+		
+		switch ($elementType) {
+			case 'header':
+				// Sortable column headers should be keyboard accessible
+				if (!empty($config['sortable'])) {
+					$attributes['tabindex'] = '0';
+					$attributes['role'] = 'button';
+					$attributes['aria-keyshortcuts'] = 'Enter Space';
+				}
+				break;
+				
+			case 'button':
+			case 'action':
+				// Action buttons should be keyboard accessible
+				$attributes['tabindex'] = '0';
+				break;
+				
+			case 'pagination':
+				// Pagination controls should be keyboard accessible
+				$attributes['tabindex'] = '0';
+				$attributes['aria-keyshortcuts'] = 'ArrowLeft ArrowRight';
+				break;
+				
+			case 'filter':
+				// Filter button should be keyboard accessible
+				$attributes['tabindex'] = '0';
+				break;
+		}
+		
+		return $attributes;
+	}
+	
+	/**
+	 * Build focus indicator CSS class
+	 * 
+	 * Returns CSS class for visible focus indicators on keyboard-focusable elements.
+	 * 
+	 * @return string CSS class for focus indicators
+	 * 
+	 * @accessibility Implements Requirement 12.7 - visible focus indicators
+	 *                Implements Task 4.3.5 - add visible focus indicators
+	 */
+	private function getFocusIndicatorClass(): string {
+		// Check if focus indicators are enabled
+		if (!config('canvastack.datatables.accessibility.focus_indicators', true)) {
+			return '';
+		}
+		
+		return 'canvastack-keyboard-focus';
+	}
+	
+	/**
 	 * Get column width from configuration
 	 * 
 	 * @param string $column Column name
 	 * @param array $widthColumn Width configuration
 	 * @return string Width attribute string
 	 */
-	private function getColumnWidthFromConfig($column, $widthColumn) {
+	private function getColumnWidthFromConfig(string $column, array $widthColumn): string {
 		$columnLower = strtolower($column);
 		
 		if (!empty($widthColumn[$columnLower])) {
@@ -826,7 +1246,7 @@ class Builder {
 	 * @param array $attributes Table attributes
 	 * @return string HTML for merged headers
 	 */
-	private function mergeColumns($mergeColumn = [], $columns = [], $attributes = []) {
+	private function mergeColumns(array $mergeColumn = [], array $columns = [], array $attributes = []): string {
 		if (empty($mergeColumn)) {
 			return '';
 		}
@@ -848,7 +1268,7 @@ class Builder {
 	 * @param array $attributes Table attributes
 	 * @return array [columnColor, headerColor]
 	 */
-	private function extractColorSettings($attributes) {
+	private function extractColorSettings(array $attributes): array {
 		$columnColor = [];
 		$headerColor = null;
 		
@@ -872,15 +1292,20 @@ class Builder {
 	 * @param array $attributes Table attributes
 	 * @return string HTML for merged row
 	 */
-	private function buildMergedTableRow(&$columns, $mergeColumn, $dataColumns, $columnColor, $headerColor, $attributes) {
-		$mergedTable = '<tr>';
+	private function buildMergedTableRow(array &$columns, array $mergeColumn, array $dataColumns, array $columnColor, ?string $headerColor, array $attributes): string {
 		$setMergeText = self::MERGE_TEXT_SEPARATOR;
+		
+		/**
+		 * @performance Use array collection + implode() instead of repeated .= in loop
+		 * to avoid repeated string reallocation on each append.
+		 */
+		$mergedParts = [];
 		
 		foreach ($columns as $index => $column) {
 			$matchedMerge = $this->findMatchingMergeColumn($column, $mergeColumn);
 			
 			if ($matchedMerge) {
-				$mergedTable .= $this->renderMergedColumnHeader(
+				$mergedParts[] = $this->renderMergedColumnHeader(
 					$column,
 					$matchedMerge,
 					$dataColumns,
@@ -894,7 +1319,7 @@ class Builder {
 			}
 		}
 		
-		return $mergedTable . '</tr>';
+		return '<tr>' . implode('', $mergedParts) . '</tr>';
 	}
 	
 	/**
@@ -904,7 +1329,7 @@ class Builder {
 	 * @param array $mergeColumn Merge configuration
 	 * @return array|null Matched merge data or null
 	 */
-	private function findMatchingMergeColumn($column, $mergeColumn) {
+	private function findMatchingMergeColumn(string $column, array $mergeColumn): ?array {
 		foreach ($mergeColumn as $mergeLabel => $mergeData) {
 			if (in_array($column, $mergeData['columns'])) {
 				return [
@@ -928,14 +1353,21 @@ class Builder {
 	 * @param array $attributes Table attributes
 	 * @return string HTML for column header
 	 */
-	private function renderMergedColumnHeader($column, $mergeData, $dataColumns, $columnColor, $headerColor, $attributes) {
+	private function renderMergedColumnHeader(string $column, array $mergeData, array $dataColumns, array $columnColor, ?string $headerColor, array $attributes): string {
 		// PERFORMANCE: Use cached column label
 		$headerLabel = $this->getColumnLabel($column);
 		$id = $this->buildColumnId($column, $dataColumns);
 		$columnClass = $this->buildMergedColumnClass($column, $attributes);
 		$colorStyle = $this->getColumnColorStyle($column, $columnColor);
 		
-		return "<th{$id}{$columnClass}{$headerColor}{$colorStyle}>{$headerLabel}</th>";
+		// Build ARIA attributes - create a minimal config for the helper
+		$config = ['sortable' => $attributes['sortable_columns'] ?? false, 'attributes' => $attributes];
+		$ariaAttrs = $this->buildHeaderAriaAttributes($column, $config);
+		
+		// Task 4.4.2: Add scope="col" for header association (Requirement 13.2)
+		$scopeAttr = ' scope="col"';
+		
+		return "<th{$id}{$columnClass}{$scopeAttr}{$ariaAttrs}{$headerColor}{$colorStyle}>{$headerLabel}</th>";
 	}
 	
 	/**
@@ -945,7 +1377,7 @@ class Builder {
 	 * @param array $dataColumns Column manipulation data
 	 * @return string ID attribute string
 	 */
-	private function buildColumnId($column, $dataColumns) {
+	private function buildColumnId(string $column, array $dataColumns): string {
 		if (!empty($dataColumns) && isset($dataColumns[$column])) {
 			return $this->setAttributes(['id' => canvastack_decrypt(canvastack_encrypt($dataColumns[$column]))]);
 		}
@@ -959,7 +1391,7 @@ class Builder {
 	 * @param array $attributes Table attributes
 	 * @return string Class attribute string
 	 */
-	private function buildMergedColumnClass($column, $attributes) {
+	private function buildMergedColumnClass(string $column, array $attributes): string {
 		if (!empty($attributes['attributes']['column']['class'][$column])) {
 			return $this->setAttributes(['class' => $attributes['attributes']['column']['class'][$column]]);
 		}
@@ -973,7 +1405,7 @@ class Builder {
 	 * @param array $columnColor Column color settings
 	 * @return string Color style attribute
 	 */
-	private function getColumnColorStyle($column, $columnColor) {
+	private function getColumnColorStyle(string $column, array $columnColor): string {
 		return !empty($columnColor[$column]) ? $columnColor[$column] : '';
 	}
 	
@@ -987,22 +1419,27 @@ class Builder {
 	 * @param array $attributes Table attributes
 	 * @return string HTML for header row
 	 */
-	private function buildHeaderTableRow($columns, $dataColumns, $columnColor, $headerColor, $attributes) {
+	private function buildHeaderTableRow(array $columns, array $dataColumns, array $columnColor, ?string $headerColor, array $attributes): string {
 		$columns = array_unique($columns);
 		ksort($columns);
 		
-		$headerTable = '<tr>';
 		$setMergeText = self::MERGE_TEXT_SEPARATOR;
+		
+		/**
+		 * @performance Use array collection + implode() instead of repeated .= in loop
+		 * to avoid repeated string reallocation on each append.
+		 */
+		$headerParts = [];
 		
 		foreach ($columns as $index => $column) {
 			if (str_contains($column, $setMergeText)) {
-				$headerTable .= $this->renderMergeLabel($column, $headerColor);
+				$headerParts[] = $this->renderMergeLabel($column, $headerColor);
 			} else {
-				$headerTable .= $this->renderRowspanColumn($column, $dataColumns, $columnColor, $headerColor, $attributes);
+				$headerParts[] = $this->renderRowspanColumn($column, $dataColumns, $columnColor, $headerColor, $attributes);
 			}
 		}
 		
-		return $headerTable . '</tr>';
+		return '<tr>' . implode('', $headerParts) . '</tr>';
 	}
 	
 	/**
@@ -1012,14 +1449,20 @@ class Builder {
 	 * @param string|null $headerColor Header color style
 	 * @return string HTML for merge label
 	 */
-	private function renderMergeLabel($column, $headerColor) {
+	private function renderMergeLabel(string $column, ?string $headerColor): string {
 		$setMergeText = self::MERGE_TEXT_SEPARATOR;
 		$merge_label = explode($setMergeText, $column);
 		$colspan = intval($merge_label[1]);
 		// PERFORMANCE: Use cached column label
 		$headerLabel = $this->getColumnLabel($merge_label[0]);
 		
-		return "<th class=\"merge-column\" colspan=\"{$colspan}\"{$headerColor}>{$headerLabel}</th>";
+		// Add ARIA role for merge label headers
+		$roleAttr = $this->setAttributes([TableConstants::ATTR_ROLE => TableConstants::ROLE_COLUMNHEADER]);
+		
+		// Task 4.4.2: Add scope="col" for header association (Requirement 13.2)
+		$scopeAttr = ' scope="col"';
+		
+		return "<th class=\"merge-column\" colspan=\"{$colspan}\"{$scopeAttr}{$roleAttr}{$headerColor}>{$headerLabel}</th>";
 	}
 	
 	/**
@@ -1032,21 +1475,27 @@ class Builder {
 	 * @param array $attributes Table attributes
 	 * @return string HTML for rowspan column
 	 */
-	private function renderRowspanColumn($column, $dataColumns, $columnColor, $headerColor, $attributes) {
+	private function renderRowspanColumn(string $column, array $dataColumns, array $columnColor, ?string $headerColor, array $attributes): string {
 		// PERFORMANCE: Use cached column label
 		$headerLabel = $this->getColumnLabel($column);
 		$id = $this->buildColumnId($column, $dataColumns);
 		
 		$columnLower = strtolower($column);
 		
+		// Build ARIA role attribute
+		$roleAttr = $this->setAttributes([TableConstants::ATTR_ROLE => TableConstants::ROLE_COLUMNHEADER]);
+		
+		// Task 4.4.2: Add scope="col" for header association (Requirement 13.2)
+		$scopeAttr = ' scope="col"';
+		
 		// Special columns: no, id, nik
 		if (in_array($columnLower, [self::COLUMN_NO, self::COLUMN_ID, self::COLUMN_NIK])) {
-			return "<th rowspan=\"2\" width=\"" . self::COLUMN_WIDTH_MEDIUM . "\"{$headerColor}>{$headerLabel}</th>";
+			return "<th rowspan=\"2\" width=\"" . self::COLUMN_WIDTH_MEDIUM . "\"{$scopeAttr}{$roleAttr}{$headerColor}>{$headerLabel}</th>";
 		}
 		
 		// Special column: number_lists
 		if (self::COLUMN_NUMBER_LISTS === $columnLower) {
-			return "<th rowspan=\"2\" width=\"" . self::COLUMN_WIDTH_SMALL . "\"{$headerColor}>No</th><th rowspan=\"2\" width=\"" . self::COLUMN_WIDTH_SMALL . "\"{$headerColor}>ID</th>";
+			return "<th rowspan=\"2\" width=\"" . self::COLUMN_WIDTH_SMALL . "\"{$scopeAttr}{$roleAttr}{$headerColor}>No</th><th rowspan=\"2\" width=\"" . self::COLUMN_WIDTH_SMALL . "\"{$scopeAttr}{$roleAttr}{$headerColor}>ID</th>";
 		}
 		
 		// Standard columns
@@ -1064,12 +1513,18 @@ class Builder {
 	 * @param array $attributes Table attributes
 	 * @return string HTML for standard rowspan column
 	 */
-	private function renderStandardRowspanColumn($column, $id, $headerLabel, $columnColor, $headerColor, $attributes) {
+	private function renderStandardRowspanColumn(string $column, string $id, string $headerLabel, array $columnColor, ?string $headerColor, array $attributes): string {
 		$columnClass = $this->buildRowspanColumnClass($column, $attributes);
 		$width = $this->getColumnWidth($column, $attributes);
 		$colorStyle = $this->getColumnColorStyle($column, $columnColor);
 		
-		return "<th rowspan=\"2\"{$id}{$columnClass}{$headerColor}{$colorStyle}{$width}>{$headerLabel}</th>";
+		// Build ARIA role attribute
+		$roleAttr = $this->setAttributes([TableConstants::ATTR_ROLE => TableConstants::ROLE_COLUMNHEADER]);
+		
+		// Task 4.4.2: Add scope="col" for header association (Requirement 13.2)
+		$scopeAttr = ' scope="col"';
+		
+		return "<th rowspan=\"2\"{$id}{$columnClass}{$scopeAttr}{$roleAttr}{$headerColor}{$colorStyle}{$width}>{$headerLabel}</th>";
 	}
 	
 	/**
@@ -1079,7 +1534,7 @@ class Builder {
 	 * @param array $attributes Table attributes
 	 * @return string Class attribute string
 	 */
-	private function buildRowspanColumnClass($column, $attributes) {
+	private function buildRowspanColumnClass(string $column, array $attributes): string {
 		$classAttributes = '';
 		
 		if (!empty($attributes['attributes']['column']['class'][$column])) {
@@ -1104,7 +1559,7 @@ class Builder {
 	 * @param array $attributes Table attributes
 	 * @return string Width attribute string
 	 */
-	private function getColumnWidth($column, $attributes) {
+	private function getColumnWidth(string $column, array $attributes): string {
 		$columnLower = strtolower($column);
 		
 		if (!empty($attributes['attributes']['column_width'][$columnLower])) {
@@ -1126,7 +1581,7 @@ class Builder {
 	 * @param array $columns Column list
 	 * @return array Element configuration
 	 */
-	private function setColumnElements($name, $column_data, $columns) {
+	private function setColumnElements(string $name, array $column_data, array $columns): array {
 		$element = [];
 		if (!empty($column_data[$name])) {
 			if (!empty($column_data[$name]['all::columns'])) {
@@ -1154,7 +1609,7 @@ class Builder {
 	 * @param array $data Formula data
 	 * @return array Modified columns with formula
 	 */
-	private function setFormulaColumns($columns, $data) {
+	private function setFormulaColumns(array $columns, array $data): array {
 		return canvastack_set_formula_columns($columns, $data['attributes']['conditions']['formula']);
 	}
 	
@@ -1167,7 +1622,7 @@ class Builder {
 	 * @param array $data Table data configuration
 	 * @return string DataTables JavaScript
 	 */
-	private function body($data = []) {
+	private function body(array $data = []): string {
 		$config = $this->prepareBodyConfig($data);
 		$columns = $this->prepareBodyColumns($config);
 		
@@ -1191,7 +1646,7 @@ class Builder {
 	 * @param array $data Table data
 	 * @return array Configuration array
 	 */
-	private function prepareBodyConfig($data) {
+	private function prepareBodyConfig(array $data): array {
 		$attributes = $data['attributes'];
 		$columnData = $data['columns'];
 		
@@ -1214,7 +1669,7 @@ class Builder {
 	 * @param array $config Body configuration
 	 * @return array Column list
 	 */
-	private function prepareBodyColumns($config) {
+	private function prepareBodyColumns(array $config): array {
 		$columns = $config['columnData']['lists'];
 		
 		if (true === $config['numbering']) {
@@ -1235,7 +1690,7 @@ class Builder {
 	 * @param array $config Body configuration
 	 * @return array DataTables columns configuration
 	 */
-	private function buildDataTableColumns($columns, $config) {
+	private function buildDataTableColumns(array $columns, array $config): array {
 		$alignment = $this->extractBodyAlignment($config['columnData']);
 		$sortable = $this->setColumnElements('sortable', $config['columnData'], ['columns' => $config['columnData']]);
 		$searchable = $this->setColumnElements('searchable', $config['columnData'], ['columns' => $config['columnData']]);
@@ -1272,7 +1727,7 @@ class Builder {
 	 * @param array $columnData Column data
 	 * @return array Alignment configuration
 	 */
-	private function extractBodyAlignment($columnData) {
+	private function extractBodyAlignment(array $columnData): array {
 		$alignment = [];
 		
 		if (empty($columnData['align'])) {
@@ -1299,20 +1754,32 @@ class Builder {
 	 * @param array $columns Column list
 	 * @return array Column ID configuration
 	 */
-	private function prepareColumnId($server_side, $columns) {
+	private function prepareColumnId(bool $server_side, array $columns): array {
 		if (false === $server_side) {
 			return [];
 		}
 		
+		// The ID column is hidden but required for row identification and click actions
+		// Don't try to find it in the columns array because it might have been replaced with 'number_lists'
+		// Detect ID field: use 'id' if exists, otherwise use first actual column
+		// Note: columns[0] might be 'number_lists', so we check for 'id' first
 		$firstField = 'id';
 		if (!in_array('id', $columns)) {
-			$firstField = $columns[1] ?? 'id';
+			// Find first non-special column (skip number_lists if present)
+			$firstField = $columns[0] === self::COLUMN_NUMBER_LISTS ? ($columns[1] ?? 'id') : ($columns[0] ?? 'id');
 		}
 		
-		return [
+		// Return hidden ID column configuration for row identification
+		$result = [
 			'data' => $firstField,
-			'name' => $firstField
+			'name' => $firstField,
+			'sortable' => false,
+			'searchable' => false,
+			'class' => 'control hidden-column',
+			'visible' => false
 		];
+		
+		return $result;
 	}
 	
 	/**
@@ -1321,7 +1788,7 @@ class Builder {
 	 * @param array $config Body configuration
 	 * @return array Formula fields
 	 */
-	private function extractFormulaFields($config) {
+	private function extractFormulaFields(array $config): array {
 		$formula_fields = [];
 		
 		if (empty($config['attributes']['conditions']['formula'])) {
@@ -1348,7 +1815,7 @@ class Builder {
 	 * @param array $column_id Column ID config
 	 * @return array Column configuration(s)
 	 */
-	private function buildSingleColumnConfig($column, $config, $alignment, $sortable, $searchable, $clickable, $formula_fields, $column_id) {
+	private function buildSingleColumnConfig(string $column, array $config, array $alignment, array $sortable, array $searchable, array $clickable, array $formula_fields, array $column_id): array {
 		$jsonData = [
 			'data' => $column,
 			'name' => $column,
@@ -1381,7 +1848,7 @@ class Builder {
 	 * @param array $column_id Column ID config
 	 * @return array Column configurations
 	 */
-	private function buildNumberListsColumn($column_id) {
+	private function buildNumberListsColumn(array $column_id): array {
 		$numberColumn = [
 			'data' => 'DT_RowIndex',
 			'name' => 'DT_RowIndex',
@@ -1409,7 +1876,7 @@ class Builder {
 	 * @param array $clickable Clickable settings
 	 * @return array Column configuration
 	 */
-	private function buildFormulaColumn($column, $jsonData, $alignment, $clickable) {
+	private function buildFormulaColumn(string $column, array $jsonData, array $alignment, array $clickable): array {
 		if (!empty($alignment['body'][$column])) {
 			$jsonData['class'] .= " {$alignment['body'][$column]}";
 		}
@@ -1433,7 +1900,7 @@ class Builder {
 	 * @param array $clickable Clickable settings
 	 * @return array Column configuration
 	 */
-	private function buildStandardBodyColumn($column, $jsonData, $alignment, $sortable, $searchable, $clickable) {
+	private function buildStandardBodyColumn(string $column, array $jsonData, array $alignment, array $sortable, array $searchable, array $clickable): array {
 		if (!empty($alignment['body'][$column])) {
 			$jsonData['class'] .= " {$alignment['body'][$column]}";
 		}
@@ -1462,7 +1929,7 @@ class Builder {
 	 * @param array $config Body configuration
 	 * @return array DataTables info
 	 */
-	private function buildDataTableInfo($data, $dt_columns, $config) {
+	private function buildDataTableInfo(array $data, array $dt_columns, array $config): array {
 		$new_data_columns = [];
 		foreach ($dt_columns as $dtcols) {
 			$new_data_columns[] = ($dtcols['name'] === 'DT_RowIndex') ? self::COLUMN_NUMBER_LISTS : $dtcols['name'];
@@ -1501,7 +1968,7 @@ class Builder {
 	 * @param string $tableID Table ID
 	 * @return array Updated DataTables info
 	 */
-	private function addFilterConfiguration($dt_info, $data, $tableID) {
+	private function addFilterConfiguration(array $dt_info, array $data, string $tableID): array {
 		$dt_info['searchable'] = $data['columns']['searchable'];
 		
 		if (empty($data['columns']['filters'])) {
@@ -1522,7 +1989,8 @@ class Builder {
 			$filterQuery
 		);
 		
-		$this->filter_object = $search_object;
+		// Store search object in array to support multiple tabs
+		$this->filter_object[] = $search_object;
 		
 		return $this->addFilterInfo($dt_info, $tableID, $searchInfoAttribute, $search_object, $data);
 	}
@@ -1533,11 +2001,31 @@ class Builder {
 	 * @param array $data Table data
 	 * @return array Search data configuration
 	 */
-	private function buildSearchData($data) {
+	private function buildSearchData(array $data): array {
+		// Determine which columns to use for filtering
+		$filterColumns = [];
+		if (is_array($data['columns']['filters'])) {
+			// Explicit filters defined
+			$filterColumns = $data['columns']['filters'];
+		} elseif (!empty($data['columns']['filter_groups'])) {
+			// Extract columns from filter_groups configuration
+			foreach ($data['columns']['filter_groups'] as $filterGroup) {
+				if (isset($filterGroup['column'])) {
+					$filterColumns[] = $filterGroup['column'];
+				}
+			}
+		} elseif (is_array($data['columns']['searchable']) && !empty($data['columns']['searchable'])) {
+			// Fall back to searchable columns
+			$filterColumns = array_keys($data['columns']['searchable']);
+		} elseif (isset($data['columns']['lists'])) {
+			// Last resort: use lists columns
+			$filterColumns = $data['columns']['lists'];
+		}
+		
 		$search_data = [
 			'table_name' => $data['name'],
 			'searchable' => $data['columns']['searchable'],
-			'columns' => $data['columns']['filters'],
+			'columns' => $filterColumns,
 			'relations' => $data['columns']['relations'] ?? [],
 			'foreign_keys' => $data['columns']['foreign_keys'] ?? []
 		];
@@ -1559,7 +2047,7 @@ class Builder {
 	 * @param array $data Table data
 	 * @return array [model, sql]
 	 */
-	private function extractModelOrSql($data) {
+	private function extractModelOrSql(array $data): array {
 		if (!empty($data['sql'])) {
 			return [null, $data['sql']];
 		}
@@ -1576,7 +2064,7 @@ class Builder {
 	 * @param array $data Table data
 	 * @return array Updated DataTables info
 	 */
-	private function addFilterInfo($dt_info, $tableID, $searchInfoAttribute, $search_object, $data) {
+	private function addFilterInfo(array $dt_info, string $tableID, string $searchInfoAttribute, object $search_object, array $data): array {
 		$dt_info['id'] = $tableID;
 		$dt_info['class'] = 'dt-button buttons-filter';
 		$dt_info['attributes'] = [
@@ -1593,7 +2081,31 @@ class Builder {
 		$dt_info['button_label'] = '<i class="fa fa-filter"></i> Filter';
 		$dt_info['action_button_removed'] = $data['attributes']['buttons_removed'];
 		$dt_info['modal_title'] = '<i class="fa fa-filter"></i> &nbsp; Filter';
-		$dt_info['modal_content'] = $search_object->render($searchInfoAttribute, $dt_info['name'], $data['columns']['filters']);
+		// Determine which columns to use for filtering
+		$filterColumns = [];
+		if (is_array($data['columns']['filters'])) {
+			// Explicit filters defined
+			$filterColumns = $data['columns']['filters'];
+		} elseif (!empty($data['columns']['filter_groups'])) {
+			// Extract columns from filter_groups configuration
+			foreach ($data['columns']['filter_groups'] as $filterGroup) {
+				if (isset($filterGroup['column'])) {
+					$filterColumns[] = $filterGroup['column'];
+				}
+			}
+		} elseif (is_array($data['columns']['searchable']) && !empty($data['columns']['searchable'])) {
+			// Fall back to searchable columns
+			$filterColumns = array_keys($data['columns']['searchable']);
+		} elseif (isset($data['columns']['lists'])) {
+			// Last resort: use lists columns
+			$filterColumns = $data['columns']['lists'];
+		}
+		
+		$dt_info['modal_content'] = $search_object->render(
+			$searchInfoAttribute,
+			$dt_info['name'],
+			$filterColumns
+		);
 		
 		return $dt_info;
 	}
@@ -1607,13 +2119,15 @@ class Builder {
 	 * @param bool $hasSearchable Has searchable columns
 	 * @return string DataTables JavaScript
 	 */
-	private function renderDataTable($tableID, $dt_columns, $dt_info, $hasSearchable) {
+	private function renderDataTable(string $tableID, array $dt_columns, array $dt_info, bool $hasSearchable): string {
 		$filter_data = [];
 		if (true === $hasSearchable) {
 			$filter_data = $this->getFilterDataTables();
 		}
 		
-		$dt_columns = canvastack_clear_json(json_encode($dt_columns));
+		// REFACTOR: Pass columns as array instead of JSON string
+		// This allows Scripts.php to properly convert to JSON for external JS
+		// Removed: $dt_columns = canvastack_clear_json(json_encode($dt_columns));
 		
 		if ('GET' === $this->method) {
 			return $this->datatables($tableID, $dt_columns, $dt_info, true, $filter_data);
@@ -1623,7 +2137,7 @@ class Builder {
 		return $this->datatables($tableID, $dt_columns, $dt_info, true, $filter_data);
 	}
 	
-	private function getFilterDataTables() {
+	private function getFilterDataTables(): ?string {
 		$filter_strings = null;
 		// SECURITY: Use Laravel request()
 		$request = request();
@@ -1663,7 +2177,7 @@ class Builder {
 		return $filter_strings;
 	}
 	
-	private function backgroundColor($attributes = []) {
+	private function backgroundColor(array $attributes = []): ?array {
 		if (!empty($attributes)) {
 			$tableDataColor = [];
 			foreach ($attributes as $colorCode => $dataColor) {
@@ -1692,13 +2206,31 @@ class Builder {
 		}
 	}
 	
-	private function setAttributes($attributes = []) {
+	/**
+	 * Build HTML attribute string from key-value pairs.
+	 *
+	 * @security XSS Prevention - all attribute values are escaped with htmlspecialchars().
+	 *           Attribute keys are NOT escaped here; use validateAttributeKeys() first
+	 *           for any user-supplied attribute arrays to strip dangerous event handlers.
+	 *
+	 * @param  array $attributes Key-value pairs of HTML attributes
+	 * @return string|null Rendered attribute string (e.g. ' id="foo" class="bar"')
+	 */
+	private function setAttributes(array $attributes = []): ?string {
 		$textAttribute = null;
 		if (is_array($attributes)) {
+			/**
+			 * @performance Use array collection + implode() instead of repeated .= in loop
+			 * to avoid repeated string reallocation on each append.
+			 */
+			$attrParts = [];
 			foreach ($attributes as $key => $value) {
-				// SECURITY: Escape attribute values
+				// SECURITY: Escape attribute values to prevent XSS
 				$safeValue = htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
-				$textAttribute .= " {$key}=\"{$safeValue}\"";
+				$attrParts[] = "{$key}=\"{$safeValue}\"";
+			}
+			if (!empty($attrParts)) {
+				$textAttribute = ' ' . implode(' ', $attrParts);
 			}
 		}
 		

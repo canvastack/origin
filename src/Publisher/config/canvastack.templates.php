@@ -45,9 +45,15 @@ return [
 						'js'	=> [
 							'js/plugins.js',
 							'js/scripts.js',
-							'js/canvastackscripts.js'
+							'js/canvastackscripts.js',
+							'js/canvastack-datatables.js',
+							'js/delete-handler.js'
 						],
-						'css'	=> ['css/app.css']
+						'css'	=> [
+							'css/app.css',
+							'css/canvastack.css',
+							'css/delete-modal.css'
+						]
 					]
 				]
 			],

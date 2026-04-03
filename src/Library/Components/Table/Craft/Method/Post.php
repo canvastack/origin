@@ -1,6 +1,8 @@
 <?php
 namespace Canvastack\Origin\Library\Components\Table\Craft\Method;
+
 use Canvastack\Origin\Library\Components\Table\Craft\Elements;
+use Canvastack\Origin\Library\Constants\TableConstants;
 
 /**
  * Created on Dec 28, 2022
@@ -39,7 +41,7 @@ class Post {
 		'dom'
 	];
 	
-	public function __construct($attr_id, $columns, $data = [], $server_side = false, $filters = false, $custom_url = false) {
+	public function __construct(string $attr_id, string $columns, array $data = [], bool $server_side = false, bool|array $filters = false, bool|string $custom_url = false) {
 		$this->id          = $attr_id;
 		$this->columns     = $columns;
 		$this->data        = $data;
@@ -50,12 +52,12 @@ class Post {
 		$this->config();
 	}
 	
-	private function setConfig($name, $value = true) {
+	private function setConfig(string $name, mixed $value = true): void {
 		$this->config[$name] = $value;
 	}
 	
 	private $buttonConfig = 'exportOptions:{columns:":visible:not(:last-child)"}';
-	private function config() {
+	private function config(): void {
 		foreach ($this->configName as $config) {
 			$this->setConfig($config);
 		}
@@ -75,7 +77,7 @@ class Post {
 		]));
 	}
 	
-	public function script() {
+	public function script(): string {
 		
 		$varTableID     = explode('-', $this->id);
 		$varTableID     = implode('', $varTableID);

@@ -6,6 +6,7 @@ use Canvastack\Origin\Library\Components\Table\Craft\Search\QueryBuilder;
 use Canvastack\Origin\Library\Components\Table\Craft\Search\FormGenerator;
 use Canvastack\Origin\Library\Components\Table\Craft\Search\ScriptGenerator;
 use Canvastack\Origin\Library\Components\Table\Craft\Search\ModalRenderer;
+use Canvastack\Origin\Library\Constants\TableConstants;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -70,9 +71,18 @@ class Search {
 	 * @param array $filterQuery Additional filter query
 	 * @throws \InvalidArgumentException If invalid parameters provided
 	 */
-	public function __construct($info, $model = null, $filters = [], $sql = null, $connection = null, $filterQuery = []) {
+	public function __construct(string $info, ?string $model = null, array $filters = [], ?string $sql = null, ?string $connection = null, array $filterQuery = []) {
 		// Validate inputs
 		$this->validateConstructorInputs($info, $filters, $connection);
+		
+		// DEBUG: Log connection parameter
+		\Log::debug('Search: Constructor called', [
+			'info' => $info,
+			'model' => $model,
+			'connection' => $connection,
+			'table_name' => $filters['table_name'] ?? 'not set',
+			'has_filter_groups' => !empty($filters['filter_groups'])
+		]);
 		
 		if (!empty($connection)) {
 			$this->searchConnection = $connection;
@@ -123,7 +133,7 @@ class Search {
 	 * @param mixed $connection
 	 * @throws \InvalidArgumentException
 	 */
-	private function validateConstructorInputs($info, $filters, $connection) {
+	private function validateConstructorInputs(mixed $info, mixed $filters, mixed $connection): void {
 		if (empty($info) || !is_string($info)) {
 			throw new \InvalidArgumentException('Info parameter must be a non-empty string');
 		}
@@ -153,7 +163,7 @@ class Search {
 	 * @param array $fields Field list
 	 * @return array Rendered data
 	 */
-	public function render($info, string $table, array $fields) {
+	public function render(string $info, string $table, array $fields): ?array {
 		if ($this->info === $info) {
 			$this->search_box($info, $table, $this->getColumnInfo($table, $fields), $this->model);
 			
@@ -171,7 +181,7 @@ class Search {
 	 * @param array $data Filter groups
 	 * @return void
 	 */
-	private function getFilterData($data) {
+	private function getFilterData(array $data): void {
 		$all_columns = $this->collectAllColumns();
 		$data = $this->processFilterRows($data, $all_columns);
 		$this->data = $data;
@@ -185,9 +195,12 @@ class Search {
 	 *
 	 * @return array Column mapping
 	 */
-	private function collectAllColumns() {
+	private function collectAllColumns(): array {
 		$columns = $this->filters['columns'] ?? [];
-		return !empty($columns) ? array_combine($columns, $columns) : [];
+		if (!is_array($columns) || empty($columns)) {
+			return [];
+		}
+		return array_combine($columns, $columns);
 	}
 	
 	/**
@@ -197,7 +210,7 @@ class Search {
 	 * @param array $all_columns All columns
 	 * @return array Processed data
 	 */
-	private function processFilterRows($data, $all_columns) {
+	private function processFilterRows(array $data, array $all_columns): array {
 		$processed = [];
 		
 		foreach ($data as $key => $row) {
@@ -226,7 +239,7 @@ class Search {
 	 * @param array $data Filter data
 	 * @return array Input relations
 	 */
-	private function buildInputRelations($data) {
+	private function buildInputRelations(array $data): array {
 		if (count($data) >= 2) {
 			return $this->buildMultipleInputRelations($data);
 		}
@@ -240,7 +253,7 @@ class Search {
 	 * @param array $data Filter data
 	 * @return array Input relations
 	 */
-	private function buildMultipleInputRelations($data) {
+	private function buildMultipleInputRelations(array $data): array {
 		$input_relations = ['lists' => [], 'type' => []];
 		
 		foreach ($data as $column => $row) {
@@ -265,7 +278,7 @@ class Search {
 	 * @param array $data Filter data
 	 * @return array Input relation
 	 */
-	private function buildSingleInputRelation($data) {
+	private function buildSingleInputRelation(array $data): array {
 		$the_only_data = array_keys($data);
 		$first_key = $the_only_data[0] ?? null;
 		
@@ -285,7 +298,7 @@ class Search {
 	 * @param array $input_relations Input relations
 	 * @return void
 	 */
-	private function setInputRelations($input_relations) {
+	private function setInputRelations(array $input_relations): void {
 		if (!empty($input_relations['lists'])) {
 			$this->input_relations['lists'] = array_unique($input_relations['lists']);
 		}
@@ -304,9 +317,18 @@ class Search {
 	 * @param mixed $model Model instance
 	 * @return void
 	 */
-	private function search_box($info, $tablename, $data, $model) {
+	private function search_box(string $info, string $tablename, array $data, mixed $model): void {
 		$filterQuery = $this->config->getFilterQuery();
 		$this->formGenerator->setupSearchFields($this->data);
+		
+		// Debug logging
+		if (empty($data)) {
+			Log::warning('Search: search_box called with empty data', [
+				'info' => $info,
+				'tablename' => $tablename,
+				'filters_columns' => $this->filters['columns'] ?? 'not set'
+			]);
+		}
 		
 		$script_elements = [];
 		
@@ -338,7 +360,7 @@ class Search {
 	 * @param string $tablename Table name
 	 * @return array Script elements
 	 */
-	private function processInputRelations($info, $tablename) {
+	private function processInputRelations(string $info, string $tablename): array {
 		$script_elements = [];
 		$inputRelations = $this->prepareInputRelations();
 		$this->input_relations['type'] = $inputRelations;
@@ -371,13 +393,17 @@ class Search {
 	 *
 	 * @return array Prepared relations
 	 */
-	private function prepareInputRelations() {
+	private function prepareInputRelations(): array {
 		$inputRelations = [];
 		$searchFields = $this->formGenerator->getSearchFields();
 		
 		foreach ($this->input_relations['type'] as $inputFields => $inputType) {
 			if (!empty($searchFields[$inputFields])) {
-				$inputRelations[$searchFields[$inputFields]] = $inputType;
+				$fieldName = $searchFields[$inputFields];
+				// FIX: Skip empty field names to prevent invalid selectors
+				if (!empty($fieldName) && trim($fieldName) !== '') {
+					$inputRelations[$fieldName] = $inputType;
+				}
 			}
 		}
 		
@@ -391,11 +417,13 @@ class Search {
 	 * @param array $data Column data
 	 * @return array Script elements
 	 */
-	private function processDefaultData($info, $data) {
+	private function processDefaultData(string $info, array $data): array {
 		$script_elements = [];
 		
 		foreach ($data as $field => $type) {
-			$this->formGenerator->generateDefaultFormElement($field, $type);
+			// FIX: Use buildFieldAttributes to generate unique IDs per table
+			$attributes = $this->formGenerator->buildFieldAttributes($field, $info, null);
+			$this->formGenerator->generateFormElement($field, $type, null, $attributes);
 			$script_elements[$info][$field] = $type;
 		}
 		
@@ -409,19 +437,61 @@ class Search {
 	 * @param array $fields Field names
 	 * @return array Column type information
 	 */
-	private function getColumnInfo(string $table, array $fields) {
+	private function getColumnInfo(string $table, array $fields): array {
 		$columns = [];
-		foreach ($this->getColumns($table) as $column) {
-			if (false === $this->tableFromView) {
+		$allColumns = $this->getColumns($table);
+		
+		// DEBUG: Log before processing
+		Log::debug('Search: getColumnInfo() before processing', [
+			'table' => $table,
+			'allColumns_count' => count($allColumns),
+			'allColumns' => $allColumns,
+			'tableFromView' => $this->tableFromView,
+			'requested_fields' => $fields
+		]);
+		
+		// For views, we don't need column types - just check existence
+		if (false === $this->tableFromView) {
+			foreach ($allColumns as $column) {
 				$columns[$column] = $this->getColumnType($table, $column);
 			}
+		} else {
+			// For views, just mark columns as existing (use 'string' as default type)
+			foreach ($allColumns as $column) {
+				$columns[$column] = 'string';
+			}
 		}
+		
+		// DEBUG: Log after populating columns
+		Log::debug('Search: getColumnInfo() after populating columns', [
+			'table' => $table,
+			'columns_count' => count($columns),
+			'columns_keys' => array_keys($columns),
+			'tableFromView' => $this->tableFromView
+		]);
 		
 		$info = [];
 		foreach ($fields as $field) {
 			if (!empty($columns[$field])) {
 				$info[$field] = $columns[$field];
 			}
+		}
+		
+		// DEBUG: Log final result
+		Log::debug('Search: getColumnInfo() final result', [
+			'table' => $table,
+			'info_count' => count($info),
+			'info_keys' => array_keys($info)
+		]);
+		
+		// Debug logging when no columns match
+		if (empty($info) && !empty($fields)) {
+			Log::warning('Search: No matching columns found', [
+				'table' => $table,
+				'requested_fields' => $fields,
+				'available_columns' => array_keys($columns),
+				'is_view' => $this->tableFromView
+			]);
 		}
 		
 		return $info;
@@ -433,9 +503,27 @@ class Search {
 	 * @param string $table Table name
 	 * @return array Column names
 	 */
-	private function getColumns($table) {
+	private function getColumns(string $table): array {
 		$connection = $this->searchConnection ?? 'mysql';
-		return canvastack_get_table_columns($table, $connection);
+		
+		// DEBUG: Log before calling helper
+		\Log::debug('Search: getColumns() called', [
+			'table' => $table,
+			'connection' => $connection,
+			'searchConnection' => $this->searchConnection
+		]);
+		
+		$columns = canvastack_get_table_columns($table, $connection);
+		
+		// DEBUG: Log result
+		\Log::debug('Search: getColumns() result', [
+			'table' => $table,
+			'connection' => $connection,
+			'columns_count' => count($columns),
+			'columns' => $columns
+		]);
+		
+		return $columns;
 	}
 	
 	/**
@@ -445,7 +533,7 @@ class Search {
 	 * @param string $column Column name
 	 * @return string Column type
 	 */
-	private function getColumnType($table, $column) {
+	private function getColumnType(string $table, string $column): string {
 		$connection = $this->searchConnection ?? 'mysql';
 		return canvastack_get_table_column_type($table, $column, $connection);
 	}

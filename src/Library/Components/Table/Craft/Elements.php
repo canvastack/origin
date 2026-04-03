@@ -1,5 +1,7 @@
 <?php
 namespace Canvastack\Origin\Library\Components\Table\Craft;
+
+use Canvastack\Origin\Library\Constants\TableConstants;
 /**
  * Created on Dec 28, 2022
  * 
@@ -29,7 +31,7 @@ trait Elements {
 		 "print"
 	 ]';
 	 */
-	protected function setButtons($id, $button_sets = []) {
+	protected function setButtons(string $id, array $button_sets = []): string {
 		$buttons = [];
 		foreach ($button_sets as $button) {
 			

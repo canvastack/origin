@@ -120,5 +120,59 @@ return [
 				'separator' => ', '
 			]
 		]
-	]
+	],
+
+	/*
+	 * Canvastack Table Components - Caching Configuration
+	 * =====================================================
+	 * Controls caching behaviour for the Canvastack table library.
+	 * All TTL values are in seconds.
+	 */
+	'canvastack_cache' => [
+
+		/*
+		 * Master switch. Set to false to disable all Canvastack table caching
+		 * (useful during development or debugging).
+		 */
+		'enabled' => env('CANVASTACK_TABLE_CACHE_ENABLED', true),
+
+		/*
+		 * Cache driver to use for table data.
+		 * Defaults to the application's default cache driver.
+		 * Set to 'array' for request-scoped (in-memory) caching only.
+		 */
+		'driver' => env('CANVASTACK_TABLE_CACHE_DRIVER', null),
+
+		/*
+		 * TTL for table schema cache (column names + types).
+		 * Schema rarely changes; a long TTL reduces DB round-trips.
+		 * Invalidate manually after migrations:
+		 *   canvastack_table_invalidate_schema_cache('table_name');
+		 */
+		'schema_ttl' => env('CANVASTACK_TABLE_CACHE_SCHEMA_TTL', 21600), // 6 hours
+
+		/*
+		 * TTL for table column-list cache (names only).
+		 */
+		'columns_ttl' => env('CANVASTACK_TABLE_CACHE_COLUMNS_TTL', 21600), // 6 hours
+
+		/*
+		 * TTL for table configuration cache (column defs, actions, filters).
+		 * Shorter than schema TTL because configs may change more often.
+		 */
+		'config_ttl' => env('CANVASTACK_TABLE_CACHE_CONFIG_TTL', 1800), // 30 minutes
+
+		/*
+		 * TTL for validation result cache (e.g. image file existence checks).
+		 * Short TTL because files can be added/removed at any time.
+		 */
+		'validation_ttl' => env('CANVASTACK_TABLE_CACHE_VALIDATION_TTL', 600), // 10 minutes
+
+		/*
+		 * Whitelist of table names allowed for DataTables server-side processing.
+		 * Set to null to allow any table that exists in the database.
+		 * Example: ['users', 'products', 'orders']
+		 */
+		'allowed_tables' => null,
+	],
 ];

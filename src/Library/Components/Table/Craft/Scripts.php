@@ -1,6 +1,8 @@
 <?php
 namespace Canvastack\Origin\Library\Components\Table\Craft;
 
+use Canvastack\Origin\Library\Constants\TableConstants;
+
 /**
  * Created on 22 May 2021
  * Time Created : 00:29:19
@@ -15,7 +17,7 @@ namespace Canvastack\Origin\Library\Components\Table\Craft;
 trait Scripts {
 	
 	private const MAX_ROWS_LIMIT = 999999999; // Safe limit untuk 32-bit dan 64-bit systems
-	private const DEFAULT_ROWS_LIMIT = 10;
+	private const DEFAULT_ROWS_LIMIT = TableConstants::DEFAULT_PAGE_LENGTH;
 	private const HASH_CALCULATION_DIVISOR = 80; // 8*800/80 = 80
 	
 	private $datatablesMode = 'GET';
@@ -37,7 +39,7 @@ trait Scripts {
 	 *
 	 * @return string
 	 */
-	protected function datatables($attr_id, $columns, $data_info = [], $server_side = false, $filters = false, $custom_link = false) {
+	protected function datatables(string $attr_id, string|array $columns, array $data_info = [], bool|array $server_side = false, bool|array|null $filters = false, bool|string|array $custom_link = false): string {
 		// Input validation
 		if (empty($attr_id) || empty($columns)) {
 			trigger_error('datatables(): attr_id and columns are required', E_USER_WARNING);
@@ -47,31 +49,26 @@ trait Scripts {
 		$varTableID   = $this->sanitizeTableId($attr_id);
 		$current_url  = url(canvastack_current_route()->uri);
 		
-		$buttonset    = $this->buildButtonSet($attr_id);
-		$fixedColumn  = $this->buildFixedColumnConfig($data_info);
-		$lengthMenu   = $this->buildLengthMenu($data_info);
+		// Build configuration object for external JS
+		$config = $this->buildDataTablesConfig(
+			$attr_id,
+			$varTableID,
+			$columns,
+			$data_info,
+			$current_url,
+			$server_side,
+			$filters,
+			$custom_link
+		);
 		
-		$defaultConfig = $this->buildDefaultConfig($fixedColumn, $lengthMenu, $buttonset);
-		$jsConditional = $this->buildConditionalColumns($varTableID, $data_info);
+		// Convert entire config to JSON
+		$configJson = json_encode($config, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
 		
+		// Generate simple function call to external JS
 		$js = '<script type="text/javascript">jQuery(function($) {';
+		$js .= "CanvaStack_{$varTableID}_dt = CanvastackDataTables.initialize('{$attr_id}', {$configJson});";
 		
-		if (false !== $server_side) {
-			$js .= $this->buildServerSideDataTable(
-				$attr_id,
-				$varTableID,
-				$columns,
-				$data_info,
-				$current_url,
-				$defaultConfig,
-				$jsConditional,
-				$filters,
-				$custom_link
-			);
-		} else {
-			$js .= $this->buildClientSideDataTable($attr_id, $varTableID, $columns, $defaultConfig);
-		}
-		
+		// Document load script for additional setup
 		$documentLoad = $this->buildDocumentLoadScript($attr_id, $filters, $data_info, $current_url);
 		$js .= '});' . $documentLoad . '</script>';
 		
@@ -79,12 +76,405 @@ trait Scripts {
 	}
 
 	/**
+	 * Build DataTables configuration object for external JS
+	 *
+	 * This method builds a configuration array that will be passed to
+	 * the external JavaScript file (canvastack-datatables.js) as JSON.
+	 *
+	 * @param string $attr_id
+	 * @param string $varTableID
+	 * @param string|array $columns Columns as array or JSON string
+	 * @param array $data_info
+	 * @param string $current_url
+	 * @param bool|array $server_side
+	 * @param bool|array|null $filters
+	 * @param bool|string|array $custom_link
+	 * @return array
+	 */
+	private function buildDataTablesConfig(string $attr_id, string $varTableID, string|array $columns, array $data_info, string $current_url, bool|array $server_side, bool|array|null $filters, bool|string|array $custom_link): array {
+		$buttonset    = $this->buildButtonSet($attr_id);
+		$fixedColumn  = $this->buildFixedColumnConfig($data_info);
+		$lengthMenu   = $this->buildLengthMenu($data_info);
+
+		// Build base configuration
+		$config = [
+			'datatableConfig' => [],
+			'clickAction' => null,
+			'filterButton' => null
+		];
+
+		// Parse default config string into array
+		$defaultConfigStr = $this->buildDefaultConfig($fixedColumn, $lengthMenu, $buttonset);
+		$config['datatableConfig'] = $this->parseConfigString($defaultConfigStr);
+		
+		// Phase 3: Apply DataTables Defaults (13 options)
+		// Override with config values if set
+		$config['datatableConfig']['pageLength'] = config('canvastack.datatables.defaults.page_length', 
+			$config['datatableConfig']['pageLength'] ?? 10);
+		$config['datatableConfig']['ordering'] = config('canvastack.datatables.defaults.ordering', true);
+		$config['datatableConfig']['searching'] = config('canvastack.datatables.defaults.searching', true);
+		$config['datatableConfig']['paging'] = config('canvastack.datatables.defaults.paging', true);
+		$config['datatableConfig']['info'] = config('canvastack.datatables.defaults.info', true);
+		$config['datatableConfig']['autoWidth'] = config('canvastack.datatables.defaults.auto_width', false);
+		$config['datatableConfig']['responsive'] = config('canvastack.datatables.defaults.responsive', true);
+		
+		// Scroll settings
+		if (config('canvastack.datatables.defaults.scroll_x', false)) {
+			$config['datatableConfig']['scrollX'] = true;
+		}
+		if ($scrollY = config('canvastack.datatables.defaults.scroll_y', null)) {
+			$config['datatableConfig']['scrollY'] = $scrollY;
+		}
+		if (config('canvastack.datatables.defaults.scroll_collapse', false)) {
+			$config['datatableConfig']['scrollCollapse'] = true;
+		}
+		
+		// State saving
+		if (config('canvastack.datatables.defaults.state_save', false)) {
+			$config['datatableConfig']['stateSave'] = true;
+			$config['datatableConfig']['stateDuration'] = config('canvastack.datatables.defaults.state_duration', 7200);
+		}
+		
+		// DOM layout
+		if ($dom = config('canvastack.datatables.defaults.dom', null)) {
+			$config['datatableConfig']['dom'] = $dom;
+		}
+		
+		// Add search configuration
+		if (config('canvastack.datatables.search.global_search', true)) {
+			$config['datatableConfig']['searching'] = true;
+			
+			// Add search options
+			$searchConfig = [];
+			
+			if (config('canvastack.datatables.search.case_insensitive', true)) {
+				$searchConfig['caseInsensitive'] = true;
+			}
+			
+			if (config('canvastack.datatables.search.regex_search', false)) {
+				$searchConfig['regex'] = true;
+			}
+			
+			if (!empty($searchConfig)) {
+				$config['datatableConfig']['search'] = $searchConfig;
+			}
+		} else {
+			$config['datatableConfig']['searching'] = false;
+		}
+
+		// Handle columns - convert to array if string
+		if (is_string($columns)) {
+			// Legacy: columns passed as JSON string
+			$config['datatableConfig']['columns'] = json_decode($columns, true);
+		} else {
+			// New: columns passed as array
+			$config['datatableConfig']['columns'] = $columns;
+		}
+
+		// Server-side or client-side configuration
+		if (false !== $server_side) {
+			$config['datatableConfig']['serverSide'] = true;
+			$config['datatableConfig']['rowReorder'] = ['selector' => 'td:nth-child(2)'];
+			$config['datatableConfig']['responsive'] = false;
+
+			// Build AJAX configuration
+			$dataName = $data_info['name'] ?? 'unknown';
+			$diftaParams = http_build_query([
+				'difta' => [
+					'name' => $dataName,
+					'source' => 'dynamics'
+				]
+			]);
+			$link_url = "renderDataTables=true&{$diftaParams}";
+
+			if (false !== $custom_link) {
+				if (is_array($custom_link) && count($custom_link) >= 2) {
+					$link_url = urlencode($custom_link[0]) . "=" . urlencode($custom_link[1]);
+				} elseif (is_string($custom_link)) {
+					$link_url = urlencode($custom_link) . "=true";
+				}
+			}
+
+			$scriptURI = "{$current_url}?{$link_url}";
+			$ajaxConfig = $this->buildAjaxConfigArray($attr_id, $scriptURI, $filters);
+			$config['datatableConfig']['ajax'] = $ajaxConfig;
+
+			// Column definitions
+			$config['datatableConfig']['columnDefs'] = [
+				[
+					'targets' => [1],
+					'visible' => false,
+					'searchable' => false,
+					'className' => 'control hidden-column'
+				]
+			];
+			$config['datatableConfig']['order'] = [[1, 'desc']];
+
+			// Click action configuration
+			$url_path = url(canvastack_current_route()->uri);
+			$hash = hash_code_id();
+			$config['clickAction'] = [
+				'hash' => $hash,
+				'hashDivisor' => self::HASH_CALCULATION_DIVISOR,
+				'urlPath' => $url_path
+			];
+
+			// Filter button configuration
+			if (false !== $filters) {
+				$config['filterButton'] = "CanvaStack_{$attr_id}_canvastack-dt-filter-box";
+			}
+		}
+
+		// Add initComplete callback
+		$config['datatableConfig']['initComplete'] = $this->buildInitCompleteConfig($attr_id, false);
+
+		// Add conditional columns if exists
+		$jsConditional = $this->buildConditionalColumns($varTableID, $data_info);
+		if (!empty($jsConditional)) {
+			// Store as string marker - will be handled by external JS
+			$config['datatableConfig']['createdRowJs'] = $jsConditional;
+		}
+
+		// Tasks 4.4.5-4.4.8: Add screen reader announcement configuration
+		$config['screenReaderConfig'] = [
+			'enabled' => config('canvastack.datatables.accessibility.screen_reader_support', true),
+			'announceLoading' => config('canvastack.datatables.accessibility.announce_loading', true),
+			'announceFilters' => config('canvastack.datatables.accessibility.announce_filters', true),
+			'announceSorting' => config('canvastack.datatables.accessibility.announce_sorting', true),
+			'paginationStatusId' => $attr_id . '-pagination-status',
+			'filterStatusId' => $attr_id . '-filter-status',
+			'sortStatusId' => $attr_id . '-sort-status',
+			'loadingStatusId' => $attr_id . '-loading-status'
+		];
+		
+		// Add search debounce and min length for JS
+		$config['searchConfig'] = [
+			'debounceDelay' => config('canvastack.datatables.search.debounce_delay', 300),
+			'minSearchLength' => config('canvastack.datatables.search.min_search_length', 1),
+			'highlightResults' => config('canvastack.datatables.search.highlight_results', false),
+		];
+
+		return $config;
+	}
+
+	/**
+	 * Parse config string into array
+	 *
+	 * @param string $configStr
+	 * @return array
+	 */
+	private function parseConfigString(string $configStr): array {
+		$config = [];
+		
+		// Extract lengthMenu
+		if (preg_match('/lengthMenu\s*:\s*(\[\[.*?\],\[.*?\]\])/', $configStr, $matches)) {
+			$config['lengthMenu'] = json_decode($matches[1], true);
+		} else {
+			$config['lengthMenu'] = null;
+		}
+		
+		// Parse boolean values (handle spaces around colon)
+		$config['searching'] = preg_match('/"searching"\s*:\s*true/', $configStr) === 1;
+		$config['processing'] = preg_match('/"processing"\s*:\s*true/', $configStr) === 1;
+		$config['retrieve'] = preg_match('/"retrieve"\s*:\s*false/', $configStr) === 1 ? false : true;
+		$config['paginate'] = preg_match('/"paginate"\s*:\s*true/', $configStr) === 1;
+		$config['bDeferRender'] = preg_match('/"bDeferRender"\s*:\s*true/', $configStr) === 1;
+		$config['responsive'] = preg_match('/"responsive"\s*:\s*false/', $configStr) === 1 ? false : true;
+		$config['autoWidth'] = preg_match('/"autoWidth"\s*:\s*false/', $configStr) === 1 ? false : true;
+		
+		// Parse numeric values
+		if (preg_match('/"searchDelay"\s*:\s*(\d+)/', $configStr, $matches)) {
+			$config['searchDelay'] = intval($matches[1]);
+		} else {
+			$config['searchDelay'] = 1000;
+		}
+		
+		// Parse string values
+		if (preg_match('/"dom"\s*:\s*"([^"]+)"/', $configStr, $matches)) {
+			$config['dom'] = $matches[1];
+		} else {
+			$config['dom'] = 'lBfrtip';
+		}
+		
+		// CRITICAL FIX: Don't parse buttons as JSON - it's JavaScript syntax, not JSON
+		// Extract buttons as RAW STRING and mark it for JavaScript evaluation
+		if (preg_match('/"buttons"\s*:\s*(\[.+\]),/', $configStr, $matches)) {
+			// Store as special marker that will be evaluated in JavaScript
+			$config['buttonsJs'] = $matches[1];
+		} else {
+			$config['buttonsJs'] = null;
+		}
+		
+		// Parse fixed columns config
+		if (preg_match('/scrollY:\s*(\d+)/', $configStr, $matches)) {
+			$config['scrollY'] = intval($matches[1]);
+		}
+		if (strpos($configStr, 'scrollX:true') !== false) {
+			$config['scrollX'] = true;
+		}
+		if (strpos($configStr, 'scrollCollapse:true') !== false) {
+			$config['scrollCollapse'] = true;
+		}
+		if (preg_match('/fixedColumns:\s*(\{[^}]+\})/', $configStr, $matches)) {
+			$config['fixedColumns'] = json_decode($matches[1], true);
+		}
+		
+		return $config;
+	}
+
+	/**
+	 * Build AJAX configuration as array (not string)
+	 *
+	 * @param string $attr_id
+	 * @param string $scriptURI
+	 * @param bool|array|null $filters
+	 * @return array
+	 */
+	private function buildAjaxConfigArray(string $attr_id, string $scriptURI, bool|array|null $filters): array {
+		if (!empty($this->method)) {
+			$this->datatablesMode = $this->method;
+		}
+
+		// Normalize filters
+		$filterString = '';
+		if (false !== $filters && null !== $filters) {
+			if (is_array($filters) && !empty($filters)) {
+				$filterString = '&' . http_build_query(['filters' => $filters]);
+			}
+		}
+
+		$ajaxConfig = [
+			'url' => $scriptURI . $filterString
+		];
+
+		if ('POST' === $this->datatablesMode) {
+			$ajaxConfig['type'] = 'POST';
+			$ajaxConfig['headers'] = [
+				'X-CSRF-TOKEN' => csrf_token()
+			];
+		} else {
+			// GET mode with URL optimization
+			if (true === $this->strictGetUrls) {
+				$idString = str_replace('-', '', $attr_id);
+				$strictColumns = $this->strictColumns ? 'true' : 'false';
+				// Store as markers that will be evaluated in JS
+				$ajaxConfig['dataFilter'] = 'deleteUnnecessaryDatatableComponents';
+				$ajaxConfig['dataFilterParams'] = [
+					'varName' => "canvastackDUDC{$idString}",
+					'strictColumns' => $strictColumns
+				];
+			}
+		}
+
+		return $ajaxConfig;
+	}
+
+	/**
+	 * Build initComplete configuration as array
+	 *
+	 * @param string $id
+	 * @param bool|string $location
+	 * @return array
+	 */
+	private function buildInitCompleteConfig(string $id, bool|string $location = 'footer'): array {
+		$config = [
+			'deleteTFoot' => false,
+			'columnSearch' => false,
+			'location' => $location
+		];
+
+		if (false === $location) {
+			$config['deleteTFoot'] = true;
+		} else {
+			if (true === $location) {
+				$location = 'footer';
+			}
+			$config['columnSearch'] = true;
+			$config['location'] = $location;
+		}
+
+		return $config;
+	}
+
+
+	/**
+	 * Build ARIA attributes helper function for DataTables
+	 * 
+	 * This function adds ARIA attributes to table rows and cells for accessibility.
+	 * It's called after DataTables initialization to ensure proper screen reader support.
+	 * 
+	 * Implements:
+	 * - Requirement 11.8: aria-label for action buttons
+	 * - Requirement 11.7: aria-label for pagination controls
+	 * - Requirement 11.9: aria-busy for loading states
+	 * - Task 4.2.1: aria-label to pagination controls
+	 * - Task 4.2.2: aria-current to current page
+	 * - Task 4.2.3: aria-label to action buttons
+	 * - Task 4.2.4: aria-live for status updates
+	 * 
+	 * @return string JavaScript function definition
+	 */
+	/**
+	 * DEPRECATED: This method has been moved to external JS file
+	 * @see public/assets/templates/default/js/canvastack-datatables.js
+	 * 
+	 * @deprecated Use external JS file instead
+	 * @return string Empty string
+	 */
+	private function buildAriaAttributesHelper(): string {
+		// Moved to canvastack-datatables.js
+		return '';
+	}
+	
+	/**
+	 * Build keyboard navigation handler for DataTables
+	 * 
+	 * Implements keyboard shortcuts and navigation for table accessibility:
+	 * - Enter/Space on sortable headers to sort columns
+	 * - Arrow keys for pagination navigation
+	 * - Keyboard shortcuts for common actions
+	 * - Visible focus indicators via CSS
+	 * 
+	 * Implements:
+	 * - Requirement 12.5: Keyboard sorting functionality
+	 * - Requirement 12.6: Keyboard shortcuts for common actions
+	 * - Task 4.3.2: Add keyboard shortcuts for common actions
+	 * - Task 4.3.3: Implement keyboard sorting (Enter/Space on headers)
+	 * - Task 4.3.4: Implement keyboard pagination (Arrow keys)
+	 * - Task 4.3.5: Add visible focus indicators
+	 * 
+	 * @return string JavaScript function definition
+	 */
+	/**
+	 * DEPRECATED: This method has been moved to external JS file
+	 * @see public/assets/templates/default/js/canvastack-datatables.js
+	 * 
+	 * @deprecated Use external JS file instead
+	 * @return string Empty string
+	 */
+	private function buildKeyboardNavigationHandler(): string {
+		// Moved to canvastack-datatables.js
+		return '';
+	}
+	
+	/**
+	 * Build keyboard help modal
+	 * 
+	 * Generates HTML and JavaScript for keyboard shortcuts help modal.
+	 * Modal is triggered by Ctrl+Shift+H shortcut.
+	 * 
+	 * Implements Task 4.3.2: Add keyboard shortcuts help modal
+	 * 
+	 * @return string JavaScript code for help modal
+	 */
+	
+	/**
 	 * Sanitize table ID for use in JavaScript variable names
 	 *
 	 * @param string $attr_id
 	 * @return string
 	 */
-	private function sanitizeTableId($attr_id) {
+	private function sanitizeTableId(string $attr_id): string {
 		$varTableID = explode('-', $attr_id);
 		return implode('', $varTableID);
 	}
@@ -96,7 +486,7 @@ trait Scripts {
 	 * @param string $value
 	 * @return string
 	 */
-	private function sanitizeJsValue($value) {
+	private function sanitizeJsValue(string $value): string {
 		return addslashes($value);
 	}
 	
@@ -108,7 +498,7 @@ trait Scripts {
 	 * @param mixed $default
 	 * @return mixed
 	 */
-	private function getArrayValue($array, $key, $default = null) {
+	private function getArrayValue(array $array, string $key, mixed $default = null): mixed {
 		return isset($array[$key]) ? $array[$key] : $default;
 	}
 	
@@ -118,15 +508,17 @@ trait Scripts {
 	 * @param string $attr_id
 	 * @return string
 	 */
-	private function buildButtonSet($attr_id) {
+	private function buildButtonSet(string $attr_id): string {
 		$buttonConfig = 'exportOptions:{columns:":visible:not(:last-child)"}';
-		return $this->setButtons($attr_id, [
+		$result = $this->setButtons($attr_id, [
 			'excel|text:"<i class=\"fa fa-external-link\" aria-hidden=\"true\"></i> <u>E</u>xcel"|key:{key:"e",altKey:true}',
 			'csv|'   . $buttonConfig,
 			'pdf|'   . $buttonConfig,
 			'copy|'  . $buttonConfig,
 			'print|' . $buttonConfig
 		]);
+		
+		return $result;
 	}
 	
 	/**
@@ -135,7 +527,7 @@ trait Scripts {
 	 * @param array $data_info
 	 * @return string
 	 */
-	private function buildFixedColumnConfig($data_info) {
+	private function buildFixedColumnConfig(array $data_info): string {
 		if (empty($data_info['fixed_columns'])) {
 			return '';
 		}
@@ -150,7 +542,7 @@ trait Scripts {
 	 * @param array $data_info
 	 * @return string
 	 */
-	private function buildLengthMenu($data_info) {
+	private function buildLengthMenu(array $data_info): string {
 		$allLimitRows    = self::MAX_ROWS_LIMIT;
 		$limitRowsData   = [10, 25, 50, 100, 250, 500, 1000, $allLimitRows];
 		$onloadRowsLimit = [self::DEFAULT_ROWS_LIMIT];
@@ -188,7 +580,7 @@ trait Scripts {
 	 * @param string $buttonset
 	 * @return string
 	 */
-	private function buildDefaultConfig($fixedColumn, $lengthMenu, $buttonset) {
+	private function buildDefaultConfig(string $fixedColumn, string $lengthMenu, string $buttonset): string {
 		$config = [
 			$fixedColumn,
 			'"searching"    :true,',
@@ -204,7 +596,9 @@ trait Scripts {
 			'"buttons"  :' . $buttonset . ','
 		];
 		
-		return implode('', $config);
+		$result = implode('', $config);
+		
+		return $result;
 	}
 	
 	/**
@@ -214,7 +608,7 @@ trait Scripts {
 	 * @param array $data_info
 	 * @return string|null
 	 */
-	private function buildConditionalColumns($varTableID, $data_info) {
+	private function buildConditionalColumns(string $varTableID, array $data_info): ?string {
 		if (empty($data_info['conditions']['columns'])) {
 			return null;
 		}
@@ -240,58 +634,6 @@ trait Scripts {
 	 * @param mixed $custom_link
 	 * @return string
 	 */
-	private function buildServerSideDataTable($attr_id, $varTableID, $columns, $data_info, $current_url, $defaultConfig, $jsConditional, $filters, $custom_link) {
-		// Validate required data
-		$dataName = $data_info['name'] ?? 'unknown';
-		
-		// Build URL dengan proper encoding
-		$diftaParams = http_build_query([
-			'difta' => [
-				'name' => $dataName,
-				'source' => 'dynamics'
-			]
-		]);
-		$link_url = "renderDataTables=true&{$diftaParams}";
-		
-		if (false !== $custom_link) {
-			if (is_array($custom_link) && count($custom_link) >= 2) {
-				$link_url = urlencode($custom_link[0]) . "=" . urlencode($custom_link[1]);
-			} elseif (is_string($custom_link)) {
-				$link_url = urlencode($custom_link) . "=true";
-			}
-		}
-		
-		$scriptURI    = "{$current_url}?{$link_url}";
-		$colDefs      = ",columnDefs:[{target:[1],visible:false,searchable:false,className:'control hidden-column'}";
-		$orderColumn  = ",order:[[1,'desc']]{$colDefs}]";
-		$columns      = ",columns:{$columns}{$orderColumn}";
-		
-		$url_path     = url(canvastack_current_route()->uri);
-		$hash         = hash_code_id();
-		$hashDivisor  = self::HASH_CALCULATION_DIVISOR;
-		
-		// Escape untuk keamanan JavaScript
-		$safeHash = addslashes($hash);
-		$safeUrlPath = addslashes($url_path);
-		
-		// Format asli: parseInt(string - number) akan auto-convert string ke number dulu
-		$clickAction  = ".on('click','td.clickable', function(){ var getRLP = $(this).parent('tr').attr('rlp'); if(getRLP != false) { var _rlp = parseInt(getRLP.replace('{$safeHash}','')-{$hashDivisor}); window.location='{$safeUrlPath}/'+_rlp+'/edit'; } });";
-		
-		$initComplete = ',' . $this->initComplete($attr_id, false);
-		$responsive   = "rowReorder :{selector:'td:nth-child(2)'},responsive: false,";
-		
-		$ajax = $this->buildAjaxConfig($attr_id, $scriptURI, $filters);
-		
-		// Build filter button append (harus tanpa semicolon agar chaining bekerja)
-		$filterButton = '';
-		if (false !== $filters) {
-			$filterButton = "$('div#{$attr_id}_wrapper>.dt-buttons').append('<span class=\"CanvaStack_{$attr_id}_canvastack-dt-filter-box\"></span>')";
-		}
-		
-		$js = "CanvaStack_{$varTableID}_dt = $('#{$attr_id}').DataTable({ {$responsive} {$defaultConfig} 'serverSide':true,{$ajax}{$columns}{$initComplete}{$jsConditional} }){$clickAction}{$filterButton}";
-		
-		return $js;
-	}
 	
 	/**
 	 * Build AJAX configuration for DataTables
@@ -301,36 +643,16 @@ trait Scripts {
 	 * @param boolean|array|null $filters
 	 * @return string
 	 */
-	private function buildAjaxConfig($attr_id, $scriptURI, $filters) {
-		if (!empty($this->method)) {
-			$this->datatablesMode = $this->method;
-		}
-		
-		// Normalize filters
-		$filterString = '';
-		if (false !== $filters && null !== $filters) {
-			if (is_array($filters) && !empty($filters)) {
-				$filterString = '&' . http_build_query(['filters' => $filters]);
-			}
-		}
-		
-		if ('POST' === $this->datatablesMode) {
-			$token = csrf_token();
-			$safeScriptURI = addslashes($scriptURI);
-			return "ajax:{url:'{$safeScriptURI}{$filterString}',type:'POST',headers:{'X-CSRF-TOKEN': '{$token}'} }";
-		}
-		
-		// GET mode with URL optimization
-		$idString = str_replace('-', '', $attr_id);
-		$ajaxLimitGetURLs = '';
-		
-		if (true === $this->strictGetUrls) {
-			$strictColumns = $this->strictColumns ? 'true' : 'false';
-			$ajaxLimitGetURLs = ",data: function (data) {var canvastackDUDC{$idString} = data; deleteUnnecessaryDatatableComponents(canvastackDUDC{$idString}, {$strictColumns})}";
-		}
-		
-		$safeScriptURI = addslashes($scriptURI);
-		return "ajax:{ url:'{$safeScriptURI}{$filterString}'{$ajaxLimitGetURLs} }";
+	/**
+	 * DEPRECATED: This method has been replaced by buildAjaxConfigArray()
+	 * @see buildAjaxConfigArray()
+	 * 
+	 * @deprecated Use buildAjaxConfigArray() instead
+	 * @return string Empty string
+	 */
+	private function buildAjaxConfig(string $attr_id, string $scriptURI, bool|array|null $filters): string {
+		// Replaced by buildAjaxConfigArray()
+		return '';
 	}
 	
 	/**
@@ -342,9 +664,6 @@ trait Scripts {
 	 * @param string $defaultConfig
 	 * @return string
 	 */
-	private function buildClientSideDataTable($attr_id, $varTableID, $columns, $defaultConfig) {
-		return "CanvaStack_{$varTableID}_dt = $('#{$attr_id}').DataTable({ {$defaultConfig}columns:{$columns} });";
-	}
 	
 	/**
 	 * Build document load script
@@ -355,7 +674,7 @@ trait Scripts {
 	 * @param string $current_url
 	 * @return string
 	 */
-	private function buildDocumentLoadScript($attr_id, $filters, $data_info, $current_url) {
+	private function buildDocumentLoadScript(string $attr_id, bool|array|null $filters, array $data_info, string $current_url): string {
 		$varTableID = $this->sanitizeTableId($attr_id);
 		$filterJs   = '';
 		
@@ -408,7 +727,7 @@ trait Scripts {
 	 * @param string|null $match_contained
 	 * @return string|null
 	 */
-	private function getJsContainMatch($data, $match_contained = null) {
+	private function getJsContainMatch(string $data, ?string $match_contained = null): ?string {
 		$isNegativeMatch = in_array($match_contained, ['!=', '!=='], true);
 		$isPositiveMatch = in_array($match_contained, ['==', '==='], true);
 		
@@ -434,7 +753,7 @@ trait Scripts {
 	 * @param array $columns
 	 * @return string|null
 	 */
-	private function conditionalColumns($tableIdentity, $data, $columns) {
+	private function conditionalColumns(string $tableIdentity, array $data, array $columns): ?string {
 		if (empty($data)) {
 			return null;
 		}
@@ -442,7 +761,9 @@ trait Scripts {
 		$icols = array_flip($columns);
 		$data = $this->mapColumnIndices($data, $icols);
 		
-		$js = ", 'createdRow': function(row, data, dataIndex, cells) {";
+		// Return just the function body (without leading comma and property name)
+		// This will be wrapped in new Function() by external JS
+		$js = "";
 		
 		foreach ($data as $condition) {
 			if (empty($condition['logic_operator'])) {
@@ -454,8 +775,6 @@ trait Scripts {
 			$js .= "}";
 		}
 		
-		$js .= "}";
-		
 		return $js;
 	}
 	
@@ -466,7 +785,7 @@ trait Scripts {
 	 * @param array $icols
 	 * @return array
 	 */
-	private function mapColumnIndices($data, $icols) {
+	private function mapColumnIndices(array $data, array $icols): array {
 		foreach ($data as $idx => $_data) {
 			// Validate required keys
 			if (!isset($_data['field_name'])) {
@@ -491,7 +810,7 @@ trait Scripts {
 	 * @param array $condition
 	 * @return string
 	 */
-	private function buildConditionCheck($condition) {
+	private function buildConditionCheck(array $condition): string {
 		// Validate condition structure
 		if (!isset($condition['field_name']) || !isset($condition['value'])) {
 			return '';
@@ -535,7 +854,7 @@ trait Scripts {
 	 * @param string $tableIdentity
 	 * @return string
 	 */
-	private function applyConditionAction($condition, $tableIdentity) {
+	private function applyConditionAction(array $condition, string $tableIdentity): string {
 		$target = $condition['field_target'];
 		
 		if ('row' === $target) {
@@ -560,7 +879,7 @@ trait Scripts {
 	 * @param array $condition
 	 * @return string
 	 */
-	private function applyRowAction($condition) {
+	private function applyRowAction(array $condition): string {
 		// Validate condition has required keys
 		if (!isset($condition['rule']) || !isset($condition['action'])) {
 			return '';
@@ -578,7 +897,7 @@ trait Scripts {
 	 * @param string $tableIdentity
 	 * @return string
 	 */
-	private function applyCellAction($condition, $tableIdentity) {
+	private function applyCellAction(array $condition, string $tableIdentity): string {
 		$rule = $condition['rule'] ?? null;
 		$fieldName = $condition['node']['field_name'] ?? null;
 		
@@ -624,7 +943,7 @@ trait Scripts {
 	 * @param array $condition
 	 * @return string
 	 */
-	private function applyColumnAction($condition) {
+	private function applyColumnAction(array $condition): string {
 		$rule = $condition['rule'] ?? null;
 		$fieldName = $condition['node']['field_name'] ?? null;
 		
@@ -671,7 +990,7 @@ trait Scripts {
 	 * @param string $tableIdentity
 	 * @return string
 	 */
-	private function applyFieldTargetAction($condition, $tableIdentity) {
+	private function applyFieldTargetAction(array $condition, string $tableIdentity): string {
 		$fieldTarget = $condition['node']['field_target'] ?? null;
 		$rule = $condition['rule'] ?? null;
 		
@@ -710,7 +1029,7 @@ trait Scripts {
 	 * @param array $condition
 	 * @return string
 	 */
-	private function applyReplaceAction($cellSelector, $condition) {
+	private function applyReplaceAction(string $cellSelector, array $condition): string {
 		$action = $condition['action'] ?? '';
 		
 		if ('integer' === $action) {
@@ -741,7 +1060,7 @@ trait Scripts {
 	 * @param string $fieldTarget
 	 * @return string
 	 */
-	private function buildButtonReplacement($tableIdentity, $action, $fieldTarget) {
+	private function buildButtonReplacement(string $tableIdentity, string $action, string $fieldTarget): string {
 		$tableIdentityParts = explode('_', $tableIdentity);
 		$node_table = isset($tableIdentityParts[1]) ? $tableIdentityParts[1] : 'table';
 		
@@ -785,7 +1104,7 @@ trait Scripts {
 	 * @param string $tableIdentity
 	 * @return string
 	 */
-	private function buildAjaxButtonHandler($node_table, $button, $tableIdentity) {
+	private function buildAjaxButtonHandler(string $node_table, array $button, string $tableIdentity): string {
 		// Escape token untuk keamanan
 		$safeToken = addslashes($button['token']);
 		
@@ -831,7 +1150,7 @@ trait Scripts {
 	 * @param mixed $value
 	 * @return string
 	 */
-	private function escapeJsString($value) {
+	private function escapeJsString(mixed $value): string {
 		return json_encode($value, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
 	}
 	
@@ -949,13 +1268,17 @@ trait Scripts {
 	 * @param string $delimeter
 	 * @return string
 	 */
-	private function export($id, $url, $type = 'csv', $delimeter = '|') {
+	private function export(string $id, string $url, string $type = 'csv', string $delimeter = '|'): string {
 		$connection = null;
 		
 		if (canvastack_string_contained($id, '::')) {
 			$stringID   = explode('::', $id);
 			$id         = $stringID[0];
 			$connection = canvastack_encrypt($stringID[1]);
+		} else {
+			// Use default connection if not specified
+			$defaultConnection = config('database.default', 'mysql');
+			$connection = canvastack_encrypt($defaultConnection);
 		}
 		
 		$varTableID = $this->sanitizeTableId($id);
@@ -991,7 +1314,7 @@ trait Scripts {
 	 * @param string $url
 	 * @return string
 	 */
-	private function filter($id, $url) {
+	private function filter(string $id, string $url): string {
 		$varTableID = $this->sanitizeTableId($id);
 		
 		// Escape untuk JavaScript
@@ -1008,33 +1331,16 @@ trait Scripts {
 	 * @param boolean|string $location
 	 * @return string
 	 */
-	private function initComplete($id, $location = 'footer') {
-		$safeId = addslashes($id);
-		
-		if (false === $location) {
-			return "initComplete: function() {document.getElementById('{$safeId}').deleteTFoot();}";
-		}
-		
-		if (true === $location) {
-			$location = 'footer';
-		}
-		
-		$js  = "initComplete: function() {";
-		$js .= "this.api().columns().every(function(n) {";
-		$js .= "if (n > 1) {";
-		$js .= "var column = this;";
-		$js .= "var input  = document.createElement(\"input\");";
-		$js .= "$(input).attr({";
-		$js .= "'class':'form-control',";
-		$js .= "'placeholder': 'search'";
-		$js .= "}).appendTo($(column.{$location}()).empty()).on('change', function () {";
-		$js .= "column.search($(this).val(), false, false, true).draw();";
-		$js .= "});";
-		$js .= "}";
-		$js .= "});";
-		$js .= "}";
-		
-		return $js;
+	/**
+	 * DEPRECATED: This method has been replaced by buildInitCompleteConfig()
+	 * @see buildInitCompleteConfig()
+	 * 
+	 * @deprecated Use buildInitCompleteConfig() instead
+	 * @return string Empty string
+	 */
+	private function initComplete(string $id, bool|string $location = 'footer'): string {
+		// Replaced by buildInitCompleteConfig()
+		return '';
 	}
 
 	/** 
@@ -1057,7 +1363,7 @@ trait Scripts {
 	 *   "print"
 	 * ]';
 	 */
-	private function setButtons($id, $button_sets = []) {
+	private function setButtons(string $id, array $button_sets = []): string {
 		if (empty($button_sets)) {
 			return '[]';
 		}

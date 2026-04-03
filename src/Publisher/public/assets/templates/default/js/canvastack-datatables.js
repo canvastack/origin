@@ -1,0 +1,570 @@
+/**
+ * Canvastack DataTables JavaScript Module
+ * 
+ * This module handles all DataTables initialization, ARIA attributes,
+ * keyboard navigation, and accessibility features.
+ * 
+ * @author wisnuwidi@canvastack.com
+ * @copyright Canvastack
+ */
+
+var CanvastackDataTables = (function($) {
+    'use strict';
+    
+    var module = {};
+    
+    /**
+     * Initialize DataTable with configuration
+     * 
+     * @param {string} tableId - Table element ID
+     * @param {object} config - DataTable configuration object
+     * @returns {object} DataTable API instance
+     */
+    module.initialize = function(tableId, config) {
+        // Ensure jQuery and DataTables are loaded
+        if (typeof $ === 'undefined' || typeof $.fn.dataTable === 'undefined') {
+            console.error('jQuery or DataTables not loaded');
+            return null;
+        }
+        
+        // Check if table element exists
+        var $table = $('#' + tableId);
+        if ($table.length === 0) {
+            console.error('CanvastackDataTables: Table element not found with ID:', tableId);
+            return null;
+        }
+        
+
+        
+        // Setup prototypes before initialization
+        module.setupAriaAttributesPrototype();
+        module.setupKeyboardNavigationPrototype();
+        module.setupHelpModal();
+        
+        // Process createdRow JavaScript if provided
+        if (config.datatableConfig.createdRowJs) {
+            var createdRowJs = config.datatableConfig.createdRowJs;
+            // Evaluate the JavaScript string to create the function
+            // This is safe because createdRowJs comes from trusted PHP backend
+            try {
+                config.datatableConfig.createdRow = new Function('row', 'data', 'dataIndex', 'cells', createdRowJs);
+            } catch (e) {
+                console.error('CanvastackDataTables: Error parsing createdRow function:', e);
+            }
+            delete config.datatableConfig.createdRowJs;
+        }
+        
+        // Process initComplete configuration
+        if (config.datatableConfig.initComplete) {
+            var initConfig = config.datatableConfig.initComplete;
+            config.datatableConfig.initComplete = function(settings, json) {
+                var api = this.api();
+                
+                // Delete tfoot if configured
+                if (initConfig.deleteTFoot) {
+                    var tableEl = document.getElementById(tableId);
+                    if (tableEl && tableEl.deleteTFoot) {
+                        tableEl.deleteTFoot();
+                    }
+                }
+                
+                // Apply ARIA attributes and keyboard navigation
+                api.addAriaAttributes().setupAriaBusy().setupKeyboardNavigation();
+                
+                // Setup column search if configured
+                if (initConfig.columnSearch) {
+                    api.columns().every(function(n) {
+                        if (n > 1) {
+                            var column = this;
+                            var input = document.createElement("input");
+                            $(input).attr({
+                                'class': 'form-control',
+                                'placeholder': 'search'
+                            }).appendTo($(column[initConfig.location]()).empty()).on('change', function() {
+                                column.search($(this).val(), false, false, true).draw();
+                            });
+                        }
+                    });
+                }
+            };
+        }
+        
+        // CRITICAL FIX: Handle buttonsJs - evaluate JavaScript string instead of using JSON
+        if (config.datatableConfig.buttonsJs) {
+            try {
+                // Evaluate the JavaScript string to get the actual buttons array
+                config.datatableConfig.buttons = eval('(' + config.datatableConfig.buttonsJs + ')');
+
+                delete config.datatableConfig.buttonsJs;
+            } catch (e) {
+                console.error('CanvastackDataTables: Error evaluating buttons:', e);
+                config.datatableConfig.buttons = [];
+                delete config.datatableConfig.buttonsJs;
+            }
+        }
+        
+        // Process AJAX data filter if configured
+        if (config.datatableConfig.ajax && config.datatableConfig.ajax.dataFilter) {
+            var filterFunc = config.datatableConfig.ajax.dataFilter;
+            var filterParams = config.datatableConfig.ajax.dataFilterParams;
+            
+            config.datatableConfig.ajax.data = function(data) {
+                var varName = filterParams.varName;
+                window[varName] = data;
+                if (typeof window[filterFunc] === 'function') {
+                    window[filterFunc](window[varName], filterParams.strictColumns === 'true');
+                }
+            };
+            
+            delete config.datatableConfig.ajax.dataFilter;
+            delete config.datatableConfig.ajax.dataFilterParams;
+        }
+        
+
+        
+        // Initialize DataTable with the provided configuration
+        // DOM layout is controlled by config.datatableConfig.dom (e.g., "lBfrtip")
+        try {
+            var dtApi = $table.DataTable(config.datatableConfig);
+            
+            // Handle click actions if configured
+            if (config.clickAction) {
+                module.setupClickAction(tableId, config.clickAction, dtApi);
+            }
+            
+            // Handle filter button if configured
+            if (config.filterButton) {
+                module.setupFilterButton(tableId, config.filterButton);
+            }
+            
+            return dtApi;
+        } catch (error) {
+            console.error('CanvastackDataTables: Error initializing DataTable:', error);
+            
+            return null;
+        }
+    };
+    
+    /**
+     * Setup ARIA attributes prototype for DataTables API
+     */
+    module.setupAriaAttributesPrototype = function() {
+        if ($.fn.dataTable.Api.prototype.addAriaAttributes) {
+            return; // Already defined
+        }
+        
+        $.fn.dataTable.Api.prototype.addAriaAttributes = function() {
+            var table = this.table().node();
+            var wrapper = $(table).closest('.dataTables_wrapper');
+            
+            // Task 4.4.3: Add role="row" to tbody rows and role="cell" to tbody cells
+            // This provides context for screen readers to understand table structure
+            $(table).find('tbody tr').attr('role', 'row');
+            $(table).find('tbody td').attr('role', 'cell');
+            
+            // Add aria-label to action buttons
+            $(table).find('tbody td a[title]').each(function() {
+                var title = $(this).attr('title');
+                if (title) { $(this).attr('aria-label', title); }
+            });
+            
+            $(table).find('tbody td button[data-original-title]').each(function() {
+                var title = $(this).attr('data-original-title');
+                if (title) { $(this).attr('aria-label', title); }
+            });
+            
+            // Add aria-label to pagination controls
+            wrapper.find('.dataTables_paginate').attr('aria-label', 'Table pagination');
+            wrapper.find('.paginate_button.previous').attr('aria-label', 'Previous page');
+            wrapper.find('.paginate_button.next').attr('aria-label', 'Next page');
+            wrapper.find('.paginate_button.first').attr('aria-label', 'First page');
+            wrapper.find('.paginate_button.last').attr('aria-label', 'Last page');
+            
+            // Add aria-current to current page
+            wrapper.find('.paginate_button').each(function() {
+                if ($(this).hasClass('current')) {
+                    $(this).attr('aria-current', 'page');
+                    var pageNum = $(this).text();
+                    $(this).attr('aria-label', 'Page ' + pageNum + ' (current)');
+                } else if (!$(this).hasClass('previous') && !$(this).hasClass('next') && !$(this).hasClass('first') && !$(this).hasClass('last')) {
+                    var pageNum = $(this).text();
+                    $(this).attr('aria-label', 'Go to page ' + pageNum);
+                }
+            });
+            
+            // Add aria-live region for status updates
+            if (wrapper.find('.dataTables_info').length > 0) {
+                wrapper.find('.dataTables_info').attr({'aria-live': 'polite', 'aria-atomic': 'true', 'role': 'status'});
+            }
+            
+            // Add aria-label to length menu
+            wrapper.find('.dataTables_length select').attr('aria-label', 'Number of rows per page');
+            
+            // Add aria-label to search input
+            wrapper.find('.dataTables_filter input').attr('aria-label', 'Search table');
+            
+            return this;
+        };
+        
+        $.fn.dataTable.Api.prototype.setupAriaBusy = function() {
+            var table = this.table().node();
+            var api = this;
+            var tableId = $(table).attr('id');
+            
+            // Set aria-busy on processing start
+            $(table).on('processing.dt', function(e, settings, processing) {
+                $(table).attr('aria-busy', processing ? 'true' : 'false');
+                
+                // Task 4.4.8: Announce loading status to screen readers
+                var loadingStatusEl = document.getElementById(tableId + '-loading-status');
+                if (loadingStatusEl) {
+                    if (processing) {
+                        loadingStatusEl.textContent = 'Loading table data, please wait...';
+                    } else {
+                        loadingStatusEl.textContent = 'Table data loaded successfully.';
+                        // Clear the message after 2 seconds
+                        setTimeout(function() {
+                            loadingStatusEl.textContent = '';
+                        }, 2000);
+                    }
+                }
+            });
+            
+            // Initialize with false
+            $(table).attr('aria-busy', 'false');
+            
+            // Update pagination ARIA attributes on draw
+            $(table).on('draw.dt', function() {
+                api.addAriaAttributes();
+                
+                // Task 4.4.5: Announce pagination info to screen readers
+                module.announcePaginationStatus(api, tableId);
+            });
+            
+            // Task 4.4.7: Announce sort direction on column sort
+            $(table).on('order.dt', function() {
+                module.announceSortStatus(api, tableId);
+            });
+            
+            return this;
+        };
+    };
+    
+    /**
+     * Setup keyboard navigation prototype for DataTables API
+     */
+    module.setupKeyboardNavigationPrototype = function() {
+        if ($.fn.dataTable.Api.prototype.setupKeyboardNavigation) {
+            return; // Already defined
+        }
+        
+        $.fn.dataTable.Api.prototype.setupKeyboardNavigation = function() {
+            var table = this.table().node();
+            var api = this;
+            var wrapper = $(table).closest('.dataTables_wrapper');
+            
+            // Ensure all sortable headers have proper attributes and class
+            $(table).find('thead th[role="button"], thead th[tabindex="0"]').each(function() {
+                $(this).addClass('canvastack-keyboard-focus');
+                if (!$(this).attr('tabindex')) $(this).attr('tabindex', '0');
+                if (!$(this).attr('role')) $(this).attr('role', 'button');
+            });
+            
+            // Keyboard sorting on column headers (Enter/Space)
+            $(table).find('thead th[role="button"]').on('keydown', function(e) {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    $(this).click();
+                }
+            });
+            
+            // Keyboard pagination (Arrow keys)
+            wrapper.on('keydown', function(e) {
+                var activeElement = document.activeElement;
+                var isPaginationFocused = $(activeElement).closest('.dataTables_paginate').length > 0;
+                
+                // Arrow Left: Previous page
+                if (e.key === 'ArrowLeft' && isPaginationFocused) {
+                    e.preventDefault();
+                    var prevButton = wrapper.find('.paginate_button.previous:not(.disabled)');
+                    if (prevButton.length > 0) {
+                        prevButton.click();
+                        prevButton.focus();
+                    }
+                }
+                
+                // Arrow Right: Next page
+                if (e.key === 'ArrowRight' && isPaginationFocused) {
+                    e.preventDefault();
+                    var nextButton = wrapper.find('.paginate_button.next:not(.disabled)');
+                    if (nextButton.length > 0) {
+                        nextButton.click();
+                        nextButton.focus();
+                    }
+                }
+            });
+            
+            // Keyboard shortcuts: Ctrl+F to focus search
+            $(document).on('keydown', function(e) {
+                if (e.ctrlKey && e.key === 'f' && wrapper.is(':visible')) {
+                    var searchInput = wrapper.find('.dataTables_filter input');
+                    if (searchInput.length > 0) {
+                        e.preventDefault();
+                        searchInput.focus();
+                    }
+                }
+            });
+            
+            // Add visible focus indicators via class (CSS in canvastacks.css)
+            $(table).find('thead th[role="button"]').addClass('canvastack-keyboard-focus');
+            wrapper.find('.paginate_button').addClass('canvastack-keyboard-focus');
+            
+            // Enhance action button keyboard accessibility
+            $(table).find('tbody td a, tbody td button').each(function() {
+                if (!$(this).attr('tabindex')) {
+                    $(this).attr('tabindex', '0');
+                }
+                $(this).addClass('canvastack-keyboard-focus');
+            });
+            
+            // Update keyboard navigation on table redraw
+            $(table).on('draw.dt', function() {
+                // Reapply class and attributes to sortable headers
+                $(table).find('thead th[role="button"], thead th[tabindex="0"]').each(function() {
+                    $(this).addClass('canvastack-keyboard-focus');
+                    if (!$(this).attr('tabindex')) $(this).attr('tabindex', '0');
+                    if (!$(this).attr('role')) $(this).attr('role', 'button');
+                });
+                
+                // Reattach keyboard event handlers
+                $(table).find('thead th[role="button"]').off('keydown').on('keydown', function(e) {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        $(this).click();
+                    }
+                });
+                
+                // Reapply to action buttons
+                $(table).find('tbody td a, tbody td button').each(function() {
+                    if (!$(this).attr('tabindex')) {
+                        $(this).attr('tabindex', '0');
+                    }
+                    $(this).addClass('canvastack-keyboard-focus');
+                });
+            });
+            
+            // Add tooltips to pagination controls
+            wrapper.find('.paginate_button.previous').attr('title', 'Previous page (Arrow Left)');
+            wrapper.find('.paginate_button.next').attr('title', 'Next page (Arrow Right)');
+            
+            // Add tooltip to search input
+            wrapper.find('.dataTables_filter input').attr('title', 'Press Ctrl+F to focus here');
+            
+            // Add keyboard help button next to search filter
+            if (!wrapper.find('.canvastack-keyboard-help-btn').length) {
+                var helpBtn = $('<button>', {
+                    'class': 'btn btn-sm btn-info canvastack-keyboard-help-btn',
+                    'type': 'button',
+                    'title': 'Keyboard shortcuts (Ctrl+Shift+H)',
+                    'html': '<i class="fa fa-keyboard-o"></i> <span style="margin-left:4px;">Help</span>',
+                    'css': {
+                        'margin-left': '10px',
+                        'vertical-align': 'middle'
+                    }
+                }).on('click', function(e) {
+                    e.preventDefault();
+                    $('#canvastack-keyboard-help-modal').fadeIn(200);
+                });
+                
+                wrapper.find('.dataTables_filter label').append(helpBtn);
+            }
+            
+            return this;
+        };
+    };
+    
+    /**
+     * Setup keyboard help modal (only once per page)
+     */
+    module.setupHelpModal = function() {
+        if (document.getElementById('canvastack-keyboard-help-modal')) {
+            return; // Already created
+        }
+        
+        // Helper function to create keyboard key display
+        function createKbdKey(text) {
+            return '<span style="background:#f8f9fa; padding:4px 8px; border:1px solid #ccc; border-radius:4px; font-family:monospace; font-size:13px; display:inline-block; margin:0 2px; box-shadow:0 2px 0 rgba(0,0,0,0.1);">' + text + '</span>';
+        }
+        
+        var modalHtml = 
+            '<div id="canvastack-keyboard-help-modal" style="display:none; position:fixed; z-index:10000; left:0; top:0; width:100%; height:100%; background-color:rgba(0,0,0,0.5);">' +
+            '<div style="background-color:#fff; margin:5% auto; padding:20px; border-radius:8px; width:80%; max-width:600px; box-shadow:0 4px 6px rgba(0,0,0,0.1);">' +
+            '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; border-bottom:2px solid #007bff; padding-bottom:10px;">' +
+            '<h3 style="margin:0; color:#007bff;"><i class="fa fa-keyboard-o"></i> Keyboard Shortcuts</h3>' +
+            '<button id="canvastack-help-close" style="background:none; border:none; font-size:24px; cursor:pointer; color:#666;" title="Close (Escape)">&times;</button>' +
+            '</div>' +
+            '<table style="width:100%; border-collapse:collapse;">' +
+            '<thead><tr style="background-color:#f8f9fa;"><th style="padding:10px; text-align:left; border-bottom:2px solid #dee2e6;">Action</th><th style="padding:10px; text-align:left; border-bottom:2px solid #dee2e6;">Keyboard Shortcut</th></tr></thead>' +
+            '<tbody>' +
+            '<tr><td style="padding:10px; border-bottom:1px solid #dee2e6;">Sort column</td><td style="padding:10px; border-bottom:1px solid #dee2e6;">' + createKbdKey('Enter') + ' or ' + createKbdKey('Space') + ' on column header</td></tr>' +
+            '<tr><td style="padding:10px; border-bottom:1px solid #dee2e6;">Navigate pages</td><td style="padding:10px; border-bottom:1px solid #dee2e6;">' + createKbdKey('Arrow Left') + ' / ' + createKbdKey('Arrow Right') + ' when pagination focused</td></tr>' +
+            '<tr><td style="padding:10px; border-bottom:1px solid #dee2e6;">Focus search</td><td style="padding:10px; border-bottom:1px solid #dee2e6;">' + createKbdKey('Ctrl') + ' + ' + createKbdKey('F') + '</td></tr>' +
+            '<tr><td style="padding:10px; border-bottom:1px solid #dee2e6;">Navigate elements</td><td style="padding:10px; border-bottom:1px solid #dee2e6;">' + createKbdKey('Tab') + ' / ' + createKbdKey('Shift+Tab') + '</td></tr>' +
+            '<tr><td style="padding:10px; border-bottom:1px solid #dee2e6;">Activate button/link</td><td style="padding:10px; border-bottom:1px solid #dee2e6;">' + createKbdKey('Enter') + '</td></tr>' +
+            '<tr><td style="padding:10px; border-bottom:1px solid #dee2e6;">Close modal</td><td style="padding:10px; border-bottom:1px solid #dee2e6;">' + createKbdKey('Escape') + '</td></tr>' +
+            '<tr><td style="padding:10px;">Show this help</td><td style="padding:10px;">' + createKbdKey('Ctrl') + ' + ' + createKbdKey('Shift') + ' + ' + createKbdKey('H') + '</td></tr>' +
+            '</tbody></table>' +
+            '<div style="margin-top:20px; padding:10px; background-color:#fff3e0; border-left:4px solid #ff6b00; border-radius:4px;">' +
+            '<small><i class="fa fa-info-circle"></i> <strong>Tip:</strong> All interactive elements show an <strong style="color:#ff6b00;">orange outline</strong> when focused via keyboard.</small>' +
+            '</div>' +
+            '</div></div>';
+        
+        $('body').append(modalHtml);
+        
+        // Close button handler
+        $('#canvastack-help-close').on('click', function() {
+            $('#canvastack-keyboard-help-modal').fadeOut(200);
+        });
+        
+        // Click outside to close
+        $('#canvastack-keyboard-help-modal').on('click', function(e) {
+            if (e.target.id === 'canvastack-keyboard-help-modal') {
+                $('#canvastack-keyboard-help-modal').fadeOut(200);
+            }
+        });
+        
+        // Escape key to close
+        $(document).on('keydown', function(e) {
+            if (e.key === 'Escape' && $('#canvastack-keyboard-help-modal').is(':visible')) {
+                $('#canvastack-keyboard-help-modal').fadeOut(200);
+            }
+        });
+        
+        // Ctrl+Shift+H to show help modal
+        $(document).on('keydown', function(e) {
+            if (e.ctrlKey && e.shiftKey && e.key === 'H') {
+                e.preventDefault();
+                $('#canvastack-keyboard-help-modal').fadeIn(200);
+            }
+        });
+    };
+    
+    /**
+     * Setup click action for table rows
+     * 
+     * @param {string} tableId - Table element ID
+     * @param {object} clickConfig - Click configuration
+     * @param {object} dtApi - DataTable API instance
+     */
+    module.setupClickAction = function(tableId, clickConfig, dtApi) {
+        $('#' + tableId).on('click', 'td.clickable', function() {
+            var getRLP = $(this).parent('tr').attr('rlp');
+            if (getRLP != false) {
+                var _rlp = parseInt(getRLP.replace(clickConfig.hash, '') - clickConfig.hashDivisor);
+                window.location = clickConfig.urlPath + '/' + _rlp + '/edit';
+            }
+        });
+    };
+    
+    /**
+     * Setup filter button
+     * 
+     * @param {string} tableId - Table element ID
+     * @param {string} filterClass - Filter class name
+     */
+    module.setupFilterButton = function(tableId, filterClass) {
+        $('div#' + tableId + '_wrapper>.dt-buttons').append('<span class="' + filterClass + '"></span>');
+    };
+    
+    /**
+     * Announce pagination status to screen readers
+     * Task 4.4.5: Announce pagination info (current page, total pages)
+     * 
+     * @param {object} api - DataTable API instance
+     * @param {string} tableId - Table element ID
+     */
+    module.announcePaginationStatus = function(api, tableId) {
+        var info = api.page.info();
+        var paginationStatusEl = document.getElementById(tableId + '-pagination-status');
+        
+        if (paginationStatusEl && info) {
+            var currentPage = info.page + 1; // DataTables uses 0-based indexing
+            var totalPages = info.pages;
+            var start = info.start + 1;
+            var end = info.end;
+            var total = info.recordsDisplay;
+            
+            var message = 'Showing ' + start + ' to ' + end + ' of ' + total + ' entries. ' +
+                         'Page ' + currentPage + ' of ' + totalPages + '.';
+            
+            paginationStatusEl.textContent = message;
+        }
+    };
+    
+    /**
+     * Announce sort status to screen readers
+     * Task 4.4.7: Announce sort direction when sorting is applied
+     * 
+     * @param {object} api - DataTable API instance
+     * @param {string} tableId - Table element ID
+     */
+    module.announceSortStatus = function(api, tableId) {
+        var sortStatusEl = document.getElementById(tableId + '-sort-status');
+        
+        if (sortStatusEl) {
+            var order = api.order();
+            
+            if (order && order.length > 0) {
+                var columnIndex = order[0][0];
+                var direction = order[0][1]; // 'asc' or 'desc'
+                var columnName = api.column(columnIndex).header().textContent.trim();
+                
+                var directionText = direction === 'asc' ? 'ascending' : 'descending';
+                var message = 'Table sorted by ' + columnName + ' in ' + directionText + ' order.';
+                
+                sortStatusEl.textContent = message;
+                
+                // Update aria-sort attribute on column headers
+                api.columns().every(function(idx) {
+                    var header = this.header();
+                    if (idx === columnIndex) {
+                        $(header).attr('aria-sort', direction === 'asc' ? 'ascending' : 'descending');
+                    } else {
+                        $(header).attr('aria-sort', 'none');
+                    }
+                });
+            }
+        }
+    };
+    
+    /**
+     * Announce filter status to screen readers
+     * Task 4.4.6: Announce filter status when filters are applied
+     * 
+     * This function should be called when filters are applied to the table.
+     * It can be triggered from external filter controls.
+     * 
+     * @param {string} tableId - Table element ID
+     * @param {string} filterDescription - Description of applied filters
+     */
+    module.announceFilterStatus = function(tableId, filterDescription) {
+        var filterStatusEl = document.getElementById(tableId + '-filter-status');
+        
+        if (filterStatusEl) {
+            if (filterDescription && filterDescription.trim() !== '') {
+                var message = 'Filter applied: ' + filterDescription;
+                filterStatusEl.textContent = message;
+            } else {
+                filterStatusEl.textContent = 'All filters cleared.';
+            }
+            
+            // Clear the message after 3 seconds
+            setTimeout(function() {
+                filterStatusEl.textContent = '';
+            }, 3000);
+        }
+    };
+    
+    return module;
+    
+})(jQuery);

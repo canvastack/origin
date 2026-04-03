@@ -15,4 +15,14 @@ use Illuminate\Database\Eloquent\Model as BaseModel;
  * @email      wisnuwidi@canvastack.com
  */
  
-class Model extends BaseModel {}
+class Model extends BaseModel {
+    /**
+     * Get the current connection name for the model.
+     * 
+     * @return string|null
+     */
+    public function getConnectionName()
+    {
+        return $this->connection;
+    }
+}

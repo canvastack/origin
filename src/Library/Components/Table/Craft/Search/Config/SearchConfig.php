@@ -17,6 +17,11 @@ class SearchConfig {
 	const FILTER_FIELD_SUFFIX = 'CanvaStackFILTERField';
 	const SCRIPT_NODE_PREFIX = 'canvastackScriptNode::';
 	const LOADER_PREFIX = 'CanvaStackInpLdr';
+
+	// Cache constants (2.4.2)
+	const CACHE_KEY_PREFIX = 'search_selections_';
+	const CACHE_TTL_DEFAULT = 300; // 5 minutes
+	const CACHE_TTL_LONG = 3600;   // 1 hour for stable reference data
 	
 	const VALID_FIELD_TYPES = [
 		'selectbox', 'text', 'date', 'datetime', 
@@ -24,14 +29,14 @@ class SearchConfig {
 		'string', 'smallint'
 	];
 	
-	private $info;
-	private $table;
-	private $filters;
-	private $relations;
-	private $foreignKeys;
-	private $modelFilters;
-	private $searchConnection;
-	private $tableFromView;
+	private string $info;
+	private string $table;
+	private array $filters;
+	private array $relations;
+	private array $foreignKeys;
+	private array $modelFilters;
+	private ?string $searchConnection;
+	private bool $tableFromView;
 	
 	/**
 	 * Constructor
@@ -41,7 +46,7 @@ class SearchConfig {
 	 * @param array $filters Filter configuration
 	 * @param string|null $connection Database connection
 	 */
-	public function __construct($info, $table, $filters, $connection = null) {
+	public function __construct(string $info, string $table, array $filters, ?string $connection = null) {
 		$this->info = $info;
 		$this->table = $table;
 		$this->filters = $filters;
@@ -50,6 +55,14 @@ class SearchConfig {
 		$this->foreignKeys = $filters['foreign_keys'] ?? [];
 		$this->modelFilters = $filters['filter_model'] ?? [];
 		$this->tableFromView = isset($filters['table_name']) && canvastack_string_contained($filters['table_name'], 'view_');
+		
+		// DEBUG: Log connection initialization
+		\Log::debug('SearchConfig: Initialized', [
+			'info' => $info,
+			'table' => $table,
+			'connection' => $connection,
+			'has_filter_groups' => !empty($filters['filter_groups'])
+		]);
 	}
 	
 	/**
@@ -57,7 +70,7 @@ class SearchConfig {
 	 *
 	 * @return string
 	 */
-	public function getInfo() {
+	public function getInfo(): string {
 		return $this->info;
 	}
 	
@@ -66,7 +79,7 @@ class SearchConfig {
 	 *
 	 * @return string
 	 */
-	public function getTable() {
+	public function getTable(): string {
 		return $this->table;
 	}
 	
@@ -75,7 +88,7 @@ class SearchConfig {
 	 *
 	 * @return array
 	 */
-	public function getFilters() {
+	public function getFilters(): array {
 		return $this->filters;
 	}
 	
@@ -84,7 +97,7 @@ class SearchConfig {
 	 *
 	 * @return array
 	 */
-	public function getRelations() {
+	public function getRelations(): array {
 		return $this->relations;
 	}
 	
@@ -93,7 +106,7 @@ class SearchConfig {
 	 *
 	 * @return array
 	 */
-	public function getForeignKeys() {
+	public function getForeignKeys(): array {
 		return $this->foreignKeys;
 	}
 	
@@ -102,7 +115,7 @@ class SearchConfig {
 	 *
 	 * @return array
 	 */
-	public function getModelFilters() {
+	public function getModelFilters(): array {
 		return $this->modelFilters;
 	}
 	
@@ -111,7 +124,7 @@ class SearchConfig {
 	 *
 	 * @return string|null
 	 */
-	public function getConnection() {
+	public function getConnection(): ?string {
 		return $this->searchConnection;
 	}
 	
@@ -120,7 +133,7 @@ class SearchConfig {
 	 *
 	 * @return bool
 	 */
-	public function isTableFromView() {
+	public function isTableFromView(): bool {
 		return $this->tableFromView;
 	}
 	
@@ -129,7 +142,7 @@ class SearchConfig {
 	 *
 	 * @return array
 	 */
-	public function getFilterQuery() {
+	public function getFilterQuery(): array {
 		return $this->filters['filter_query'] ?? [];
 	}
 }

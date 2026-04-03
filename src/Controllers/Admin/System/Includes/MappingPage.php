@@ -124,7 +124,7 @@ trait MappingPage {
 		$header    = array_merge_recursive($headerData['module_id'], $headerData['target_table'], $headerData['target_roles'], $headerData['action_button']);		
 		$row_table = $this->mapping_box();
 		
-		return canvastack_generate_table('Set Role Module Page', $title_id, $header, $row_table, false, false, false);
+		return canvastack_generate_table('Set Role Module Page', $title_id, $header, $row_table, [], false, false);
 	}
 	
 	private $group_id;

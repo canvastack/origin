@@ -412,6 +412,6 @@ trait Privileges {
 		$header              = array_merge_recursive($headerData['head'], $headerData['admin'], $headerData['index']);
 		$title_id            = 'group_privileges_' . canvastack_random_strings(50, false);
 		
-		return canvastack_generate_table('Set Role Module Page', $title_id, $header, $row_table, false, false, false);
+		return canvastack_generate_table('Set Role Module Page', $title_id, $header, $row_table, [], false, false);
 	}
 }

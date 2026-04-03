@@ -2,6 +2,9 @@
 namespace Canvastack\Origin\Library\Components\Table\Craft\Search;
 
 use Canvastack\Origin\Library\Components\Table\Craft\Search\Config\SearchConfig;
+use Canvastack\Origin\Library\Constants\SafeHtml;
+use Canvastack\Origin\Library\Constants\TableConstants;
+use Canvastack\Origin\Library\Exceptions\Table\TableValidationException;
 
 /**
  * ModalRenderer - HTML modal generation for Search component
@@ -10,11 +13,15 @@ use Canvastack\Origin\Library\Components\Table\Craft\Search\Config\SearchConfig;
  * @author     wisnuwidi@canvastack.com - 2021
  * @copyright  wisnuwidi
  * @email      wisnuwidi@canvastack.com
+ *
+ * @security XSS Prevention - table name used as modal title is escaped via
+ *           escapeHtml() before rendering. Final HTML output is marked with
+ *           SafeHtml::mark() to prevent double-encoding downstream.
  */
 class ModalRenderer {
 	
-	private $config;
-	private $html = false;
+	private SearchConfig $config;
+	private string|bool $html = false;
 	
 	/**
 	 * Constructor
@@ -28,6 +35,10 @@ class ModalRenderer {
 	/**
 	 * Generate modal HTML (SECURE - XSS protected)
 	 *
+	 * @security XSS Prevention - $tablename is escaped via escapeHtml() before
+	 *           being used as the modal box title. The final HTML output is marked
+	 *           with SafeHtml::mark() to prevent double-encoding downstream.
+	 *
 	 * @param string $info Component info
 	 * @param string $tablename Table name
 	 * @param array $formElements Form elements
@@ -36,7 +47,7 @@ class ModalRenderer {
 	 * @param array $filterQuery Filter query
 	 * @return void
 	 */
-	public function generateModalHTML($info, $tablename, $formElements, $scriptGenerator, $script_elements, $filterQuery) {
+	public function generateModalHTML(string $info, string $tablename, array $formElements, ScriptGenerator $scriptGenerator, array $script_elements, array $filterQuery): void {
 		// FIX XSS: Escape tablename for display
 		$boxTitle = $this->escapeHtml(ucwords(str_replace('-', ' ', canvastack_clean_strings($tablename))));
 		$boxName = $info . 'modalBOX';
@@ -44,18 +55,22 @@ class ModalRenderer {
 		// Generate scripts
 		$scriptGenerator->generateScripts($script_elements, $tablename, $boxName, $filterQuery);
 		
-		// Generate modal HTML
-		$this->html = canvastack_modal_content_html($boxName, $boxTitle, $formElements);
+		// Generate modal HTML and mark as safe (already escaped)
+		$rawHtml = canvastack_modal_content_html($boxName, $boxTitle, $formElements);
+		$this->html = SafeHtml::mark($rawHtml);
 	}
 	
 	/**
 	 * Escape HTML to prevent XSS
 	 *
+	 * @security XSS Prevention - uses htmlspecialchars with ENT_QUOTES and UTF-8
+	 *           to escape all special HTML characters in user-controllable values.
+	 *
 	 * @param string $value Value to escape
 	 * @return string Escaped value
 	 */
-	public function escapeHtml($value) {
-		return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
+	public function escapeHtml(string $value): string {
+		return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 	}
 	
 	/**
@@ -63,7 +78,7 @@ class ModalRenderer {
 	 *
 	 * @return string|false
 	 */
-	public function getHtml() {
+	public function getHtml(): string|false {
 		return $this->html;
 	}
 }

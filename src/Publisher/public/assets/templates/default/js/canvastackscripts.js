@@ -224,3 +224,218 @@ function mappingPageButtonManipulation(node_btn, id, target_id, second_target, u
 	firstResetRowButton(id, target_id, second_target, url, method, onError);
 }
 /* [ CLOSED ] MAPPING PAGE FUNCTION */
+
+
+/* [ START ] CASCADING FILTER FUNCTION */
+
+/**
+ * Initialize cascading filter for a select field
+ * 
+ * This function handles cascading select dropdowns where selecting a value in one field
+ * triggers an AJAX call to populate the next field with dependent data.
+ * 
+ * Features:
+ * - Automatic AJAX loading with loading indicators
+ * - Cascading field clearing when parent value changes
+ * - Debouncing support to reduce server load
+ * - Chosen plugin integration
+ * - Prevents infinite loops from Chosen events
+ * 
+ * @param {Object} config Configuration object
+ * @param {string} config.node - Node identifier
+ * @param {string} config.identity - Field name
+ * @param {string} config.uniqueId - Unique element ID
+ * @param {string} config.firstNode - First node class
+ * @param {string} config.iNode - Identity node
+ * @param {string} config.nextTarget - Next field name
+ * @param {string} config.nextTargetUniqueId - Next field unique ID
+ * @param {string} config.nextNode - Next node class
+ * @param {string} config.ajaxUrl - AJAX endpoint URL
+ * @param {Object} config.ajaxDataConfig - AJAX data configuration object
+ * @param {string} config.prevScript - Previous script for building AJAX data
+ * @param {number} config.debounceDelay - Debounce delay in milliseconds
+ * @param {string} config.nestScript - Script to disable next fields when value is empty
+ * @param {string} config.clearingLogic - Script to clear dependent fields
+ */
+function canvastackCascadingFilter(config) {
+	jQuery(function($) {
+		// Debounce helper function
+		function debounce(func, delay) {
+			var timeout;
+			return function() {
+				var context = this;
+				var args = arguments;
+				clearTimeout(timeout);
+				timeout = setTimeout(function() {
+					func.apply(context, args);
+				}, delay);
+			};
+		}
+
+		// Delay execution to ensure Chosen plugin is initialized
+		setTimeout(function() {
+			// Initialize loader for next target field (if exists)
+			if (config.nextTarget && config.nextTargetUniqueId) {
+				loader(config.nextTargetUniqueId);
+			}
+			
+			// Find and attach event handler to the select element
+			$('#' + config.node).children('div.form-group').each(function() {
+				var $elem = $(this).find('select#' + config.uniqueId + '.' + config.firstNode);
+				if ($elem.length === 0) return;
+				
+				// Processing flag to prevent infinite loops from Chosen events
+				var _processing = false;
+				
+				// Define change handler
+				var changeHandler = function() {
+					// Block if already processing to prevent infinite loops
+					if (_processing) { return; }
+					_processing = true;
+					
+					var _val = $(this).val();
+					var _prevVal = $(this).data('prevValue') || '';
+					$(this).data('prevValue', _val);
+					
+					if (_val != '0' && _val != null && _val != '') {
+						// Value is valid - execute clearing logic and AJAX call
+						
+						// Execute field clearing logic (clears fields that come after current in cascade)
+						if (config.clearingLogic) {
+							try {
+								eval(config.clearingLogic);
+							} catch (e) {
+								console.error('Error executing clearing logic:', e);
+							}
+						}
+						
+						// Build AJAX data object from config
+						var ajaxData = {};
+						var dataConfig = config.ajaxDataConfig;
+						
+						// Add field value
+						ajaxData[dataConfig.identity] = _val;
+						
+						// Build _prevS value by executing prevScript
+						var _prevS = '';
+						if (config.prevScript) {
+							try {
+								_prevS = eval(config.prevScript);
+							} catch (e) {
+								console.error('Error executing prevScript:', e);
+								_prevS = '';
+							}
+						}
+						
+						// Build _fita value
+						var fitaValue = dataConfig.token + '::' + dataConfig.table + '::' + 
+							dataConfig.next_target + '::' + dataConfig.prev + '#' + _prevS + '::' + dataConfig.nest;
+						ajaxData['_fita'] = fitaValue;
+						ajaxData['_token'] = dataConfig.token;
+						ajaxData['_n'] = dataConfig.nest;
+						ajaxData['_forKeys'] = dataConfig.forKeys;
+						
+						// Add connection if present
+						if (dataConfig.connection) {
+							ajaxData['grabCanvaStackC'] = dataConfig.connection;
+						}
+						
+						// Add filters if present
+						if (dataConfig.filters && Object.keys(dataConfig.filters).length > 0) {
+							ajaxData['_canvastackF'] = dataConfig.filters;
+						}
+						
+						// Execute AJAX call to populate next field
+						$.ajax({
+							type: 'POST',
+							url: config.ajaxUrl,
+							data: ajaxData,
+							dataType: 'json',
+							beforeSend: function() {
+								// Show loading indicator
+								$('#CanvaStackInpLdr' + config.nextTargetUniqueId).show();
+							},
+							success: function(data) {
+								if (data) {
+									if (config.nextTarget && config.nextTargetUniqueId) {
+										var $nextSelect = $('select#' + config.nextTargetUniqueId + '.' + config.nextNode);
+										$nextSelect.removeAttr('disabled');
+										$nextSelect.empty();
+										
+										// Format next target name for display
+										var nextTargetLabel = config.nextTarget.replace(/_/g, ' ').replace(/\b\w/g, function(l){ return l.toUpperCase(); });
+										$nextSelect.append('<option value="">Select ' + nextTargetLabel + '</option>');
+										
+										$.each(data, function(key, value) {
+											$nextSelect.append('<option value="'+ value[config.nextTarget] +'">' + value[config.nextTarget] + '</option>');
+										});
+										
+										// IMPORTANT: Only trigger chosen:updated ONCE after all options are added
+										$nextSelect.trigger('chosen:updated');
+										
+										// Reset processing flag after Chosen update completes
+										setTimeout(function() {
+											_processing = false;
+										}, 500);
+									}
+								}
+							},
+							error: function(xhr, status, error) {
+								console.error('Search filter load failed:', {status: status, error: error, target: config.nextTarget, xhr: xhr});
+								var errorMsg = 'Failed to load ' + config.nextTarget.replace(/_/g, ' ') + ' options. ';
+								if (xhr.status === 404) { errorMsg += 'Endpoint not found.'; }
+								else if (xhr.status === 500) { errorMsg += 'Server error.'; }
+								else if (xhr.status === 0) { errorMsg += 'Network error.'; }
+								else { errorMsg += 'Please try again.'; }
+								
+								var $nextSelect = $('select#' + config.nextTargetUniqueId + '.' + config.nextNode);
+								$nextSelect.empty()
+									.append('<option value="">Error: ' + errorMsg + '</option>')
+									.prop('disabled', true);
+								$nextSelect.trigger('chosen:updated');
+								
+								_processing = false;
+							},
+							complete: function() {
+								// Hide loading indicator
+								$('#CanvaStackInpLdr' + config.nextTargetUniqueId).hide();
+							}
+						});
+						
+					} else {
+						// Value is empty - disable all next fields
+						// IMPORTANT: Current field remains enabled with its options intact
+						
+						// Execute nest script to disable next fields
+						if (config.nestScript) {
+							try {
+								eval(config.nestScript);
+							} catch (e) {
+								console.error('Error executing nest script:', e);
+							}
+						}
+						
+						// Reset processing flag after disabling fields
+						setTimeout(function() {
+							_processing = false;
+						}, 500);
+					}
+				};
+				
+				// Attach event handler (with or without debounce)
+				if (config.debounceDelay > 0) {
+					var debouncedHandler = debounce(changeHandler, config.debounceDelay);
+					$elem.on('change', debouncedHandler);
+				} else {
+					$elem.on('change', changeHandler);
+					// Reset flag after handler completes (for non-debounced version)
+					setTimeout(function() {
+						_processing = false;
+					}, 200);
+				}
+			});
+		}, 500); // Wait for Chosen initialization
+	});
+}
+
+/* [ CLOSED ] CASCADING FILTER FUNCTION */

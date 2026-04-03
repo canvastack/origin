@@ -91,8 +91,17 @@ function exportFromModal(modalID, exportID, filterID, token, url, link, filter =
 		inputFilters.each(function(x, y) {
 			inputData[y.name]   = y.value;
 		});
-		if (null != link)   inputData['lurExp'] = link;
+		// Only add lurExp if link is not null and not empty string
+		if (link != null && link !== '')   inputData['lurExp'] = link;
 		if (null != filter) inputData['ftrExp'] = filter;
+		
+		// Debug logging
+		console.log('Export request:', {
+			url: url,
+			link: link,
+			hasLurExp: inputData.hasOwnProperty('lurExp'),
+			inputData: inputData
+		});
 		
 		$.ajax ({
 			type    : 'POST',
@@ -100,7 +109,24 @@ function exportFromModal(modalID, exportID, filterID, token, url, link, filter =
 			dataType: 'JSON',
 			url     : url,
 			success : function(n) {
-				window.location.href = n.canvastackExportStreamPath;
+				console.log('Export response:', n);
+				
+				// Check if response is valid and has export path
+				if (n && n.canvastackExportStreamPath) {
+					window.location.href = n.canvastackExportStreamPath;
+				} else if (n && n.error) {
+					// Handle error response
+					alert('Export failed: ' + (n.message || 'Unknown error'));
+					console.error('Export error:', n);
+				} else {
+					// Handle unexpected response
+					alert('Export failed: Invalid response from server');
+					console.error('Invalid export response:', n);
+				}
+			},
+			error: function(xhr, status, error) {
+				alert('Export failed: ' + error);
+				console.error('Export AJAX error:', xhr, status, error);
 			},
 			complete : function() {
 				$('#exportFilterButton' + modalID).removeAttr('style');

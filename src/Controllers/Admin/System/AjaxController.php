@@ -290,7 +290,31 @@ class AjaxController extends Controller {
 	}
 	
 	public function export() {
-		$export = new Export();
-		return $export->csv('assets/resources/exports');
+		try {
+			$export = new Export();
+			$result = $export->csv('assets/resources/exports');
+			
+			// If result is null, return error response
+			if ($result === null) {
+				return response()->json([
+					'error' => true,
+					'message' => 'Export request is invalid or missing required parameters'
+				], 400);
+			}
+			
+			// Return the export result
+			return response($result)->header('Content-Type', 'application/json');
+			
+		} catch (\Exception $e) {
+			\Log::error('Export controller error', [
+				'error' => $e->getMessage(),
+				'trace' => $e->getTraceAsString()
+			]);
+			
+			return response()->json([
+				'error' => true,
+				'message' => 'Export failed: ' . $e->getMessage()
+			], 500);
+		}
 	}
 }

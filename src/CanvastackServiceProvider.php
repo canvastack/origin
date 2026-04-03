@@ -43,6 +43,21 @@ class CanvastackServiceProvider extends ServiceProvider {
 			$this->publishes([ 
 				"{$publish_path}public" => base_path('public')
 			], 'CanvaStack Public Folder');
+			
+			// Phase 4: Register console commands
+			$this->commands([
+				\Canvastack\Origin\Console\Commands\WarmTableCache::class,
+			]);
+		}
+		
+		// Phase 4: Cache Warming - Boot warming
+		if (config('canvastack.cache.warming.on_boot', false)) {
+			$this->warmCacheOnBoot();
+		}
+		
+		// Phase 4: Cache Warming - Scheduled warming
+		if (config('canvastack.cache.warming.scheduled', false)) {
+			$this->registerScheduledWarming();
 		}
 	}
 
@@ -54,6 +69,68 @@ class CanvastackServiceProvider extends ServiceProvider {
 	public function register() {
 		$this->app->singleton(CanvaStack::class, function ($app) {
 			return new CanvaStack();
+		});
+	}
+	
+	/**
+	 * Warm cache on application boot
+	 * 
+	 * Phase 4: Cache Warming - Boot warming
+	 * Warms cache asynchronously to avoid blocking application boot.
+	 * Only runs in production environment.
+	 * 
+	 * @return void
+	 */
+	protected function warmCacheOnBoot(): void
+	{
+		// Only warm in production to avoid slowing down development
+		if (!$this->app->environment('production')) {
+			return;
+		}
+		
+		$tables = config('canvastack.cache.warming.tables', []);
+		
+		if (empty($tables)) {
+			return;
+		}
+		
+		// Warm cache asynchronously to avoid blocking boot
+		dispatch(function () use ($tables) {
+			foreach ($tables as $table) {
+				try {
+					canvastack_table_get_cached_schema($table);
+				} catch (\Exception $e) {
+					\Log::warning('Cache warming failed on boot', [
+						'table' => $table,
+						'error' => $e->getMessage(),
+					]);
+				}
+			}
+		})->afterResponse();
+	}
+	
+	/**
+	 * Register scheduled cache warming
+	 * 
+	 * Phase 4: Cache Warming - Scheduled warming
+	 * Registers the cache warming command to run on a schedule.
+	 * 
+	 * Note: This requires the Laravel scheduler to be configured in crontab:
+	 * * * * * * cd /path-to-your-project && php artisan schedule:run >> /dev/null 2>&1
+	 * 
+	 * @return void
+	 */
+	protected function registerScheduledWarming(): void
+	{
+		// Register callback for scheduler
+		$this->app->booted(function () {
+			$schedule = $this->app->make(\Illuminate\Console\Scheduling\Schedule::class);
+			
+			$cronExpression = config('canvastack.cache.warming.schedule', '0 */6 * * *');
+			$schedule->command('canvastack:warm-cache')
+			         ->cron($cronExpression)
+			         ->withoutOverlapping()
+			         ->runInBackground();
 		});
 	}
 }

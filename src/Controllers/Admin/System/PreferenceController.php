@@ -37,13 +37,6 @@ class PreferenceController extends Controller {
 		]);
 	}
 	
-	private function getIndexModel($id) {
-		$this->getModel(1);
-		$this->model_find(1);
-		
-		$this->model_data = (object) $this->model_data->getAttributes();
-	}
-	
 	public function index() {
 		return self::redirect('1/edit');
 	}

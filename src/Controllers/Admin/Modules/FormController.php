@@ -21,7 +21,7 @@ class FormController extends Controller {
 
 //	protected $inputFiles		= ['file_field', 'file_field_alt'];
 //	protected $hideFields		= ['text_field', 'selectbox_field'];
-	protected $excludeFields	= ['password_field'];
+	protected array $excludeFields	= ['password_field'];
 	
 	private $setTableFields		= ['email_field:Email', 'text_field', 'number_field:Number', 'month_field:Month', 'time_field', 'file_field', 'file_field_alt', 'updated_at'];
 	

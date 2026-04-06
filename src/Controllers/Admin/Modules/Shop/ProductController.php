@@ -36,17 +36,17 @@ class ProductController extends Controller {
 		];
 	}
 	
-	public function index() {
-		$this->setPage('Product');
-		
-		$this->table->searchable();
-		$this->table->clickable();
-		$this->table->sortable();
-		
-		$this->table->relations($this->model, 'relation_category', 'category', self::key_relations());
-		
-		$this->table->lists($this->model_table, $this->fields);
-		
-		return $this->render();
-	}
+	public function index(): \Illuminate\View\View|\Illuminate\Http\JsonResponse {
+			$this->setPage('Product');
+
+			$this->table->searchable();
+			$this->table->clickable();
+			$this->table->sortable();
+
+			$this->table->relations($this->model, 'relation_category', 'category', self::key_relations());
+
+			$this->table->lists($this->model_table, $this->fields);
+
+			return $this->render();
+		}
 }

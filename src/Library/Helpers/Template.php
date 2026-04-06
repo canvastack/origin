@@ -184,9 +184,9 @@ if (!function_exists('canvastack_breadcrumb')) {
             $o .= "</div>";
             $o .= "</div>";
         } else {
-            
-            $o  = "<div class=\"page-title-area shadow blury blury-blue\">";
-            $o .= "<div class=\"row align-items-center\">";
+            // Breadcrumb is now rendered inside header-area, so we don't need the outer wrapper
+            // Just render the breadcrumbs content directly
+            $o  = "<div class=\"row align-items-center\">";
             $o .= "<div class=\"col-sm-12\">";
             $o .= "<div class=\"breadcrumbs-area clearfix\">";
             $o .= "<h4 class=\"page-title pull-left\">{$title}</h4>";
@@ -219,7 +219,7 @@ if (!function_exists('canvastack_breadcrumb')) {
                 $o .= "</ul>";
             }
             
-            $o .= "</div></div></div></div>";
+            $o .= "</div></div></div>";
         }
         
         return $o;
@@ -312,8 +312,26 @@ if (!function_exists('canvastack_sidebar_menu')) {
 	    'E-Commerce' => 'dashboard-ecommerce.html'
 	   ], 'home');
 	 */
+	/**
+	 * Create Sidebar Menu
+	 *
+	 * @param string $label Menu label
+	 * @param string|array $links Menu URL or array of submenu items
+	 * @param array $icon Icon configuration
+	 * @param boolean $selected Whether menu is selected
+	 *
+	 * @return string HTML menu markup
+	 * 
+	 * @security CRITICAL - Escapes all user-controllable data to prevent XSS
+	 */
 	function canvastack_sidebar_menu($label, $links, $icon = [], $selected = false) {
-		$o = '<li id="' . canvastack_clean_strings($label) . '" class="submenu">';
+		// Escape label for use in ID attribute (alphanumeric only)
+		$escapedIdLabel = canvastack_clean_strings($label);
+		
+		// Escape label for display (preserve special chars but escape HTML)
+		$escapedLabel = htmlspecialchars($label, ENT_QUOTES, 'UTF-8');
+		
+		$o = '<li id="' . $escapedIdLabel . '" class="submenu">';
 		
 		$icons					= [];
 		$icons['before']		= $icon;
@@ -324,10 +342,13 @@ if (!function_exists('canvastack_sidebar_menu')) {
 			$o .= '<a class="arrow-node" href="javascript:void(0);">';
 			
 			if (false !== $icon) {
-				$o .= '<span class="icon">' . $icon['icon'] . '</span>';
+				// Icon data is system-generated from base_module table, not user input
+				// Preserve icon HTML markup (e.g., <i class="fa fa-home"></i>)
+				$safeIcon = $icon['icon'];
+				$o .= '<span class="icon">' . $safeIcon . '</span>';
 			}
 			
-			$o .= '<span class="text">' . canvastack_underscore_to_camelcase($label) . '</span>';
+			$o .= '<span class="text">' . htmlspecialchars(canvastack_underscore_to_camelcase($label), ENT_QUOTES, 'UTF-8') . '</span>';
 			$o .= '<span' . $icons['after'] . '">' . $icons['after_label'] . '</span>';
 			if (true === $selected) {
 				$o .= '<span class="selected"></span>';
@@ -338,29 +359,44 @@ if (!function_exists('canvastack_sidebar_menu')) {
 			foreach ($links as $child_title => $child_url) {
 				if (is_array($child_url)) {
 					$o .= '<li class="submenu"><a href="javascript:void(0);">';
-					$o .= '<span class="text">' . canvastack_underscore_to_camelcase($child_title) . '</span>';
+					$o .= '<span class="text">' . htmlspecialchars(canvastack_underscore_to_camelcase($child_title), ENT_QUOTES, 'UTF-8') . '</span>';
 					$o .= '<span class="arrow open fa-angle-double-down"></span></a>';
 					$o .= '<ul>';
 					foreach ($child_url as $thirdChild => $thirdURL) {
-						$o .= '<li id="' . clean_strings($label) . '-' . $child_title . '-' . canvastack_underscore_to_camelcase($thirdChild) . '"><a class="menu-url" href="' . $thirdURL . '">' . canvastack_underscore_to_camelcase($thirdChild) . '</a></li>';
+						// Escape all parts of nested menu
+						$escapedThirdChild = htmlspecialchars(canvastack_underscore_to_camelcase($thirdChild), ENT_QUOTES, 'UTF-8');
+						$escapedThirdURL = htmlspecialchars($thirdURL, ENT_QUOTES, 'UTF-8');
+						$escapedThirdId = clean_strings($label) . '-' . clean_strings($child_title) . '-' . clean_strings($thirdChild);
+						
+						$o .= '<li id="' . $escapedThirdId . '"><a class="menu-url" href="' . $escapedThirdURL . '">' . $escapedThirdChild . '</a></li>';
 					}
 					$o .= '</ul>';
 					$o .= '</li>';
 				} else {
-					$o .= '<li class="menu-active-pointer"><a class="menu-url" href="' . $child_url . '">' . canvastack_underscore_to_camelcase($child_title) . '</a></li>';
+					// Escape child menu items
+					$escapedChildTitle = htmlspecialchars(canvastack_underscore_to_camelcase($child_title), ENT_QUOTES, 'UTF-8');
+					$escapedChildUrl = htmlspecialchars($child_url, ENT_QUOTES, 'UTF-8');
+					
+					$o .= '<li class="menu-active-pointer"><a class="menu-url" href="' . $escapedChildUrl . '">' . $escapedChildTitle . '</a></li>';
 				}
 			}
 			$o .= '</ul>';
 		} else {
-			$o .= '<a href="' . $links . '">';
+			// Escape URL
+			$escapedUrl = htmlspecialchars($links, ENT_QUOTES, 'UTF-8');
+			
+			$o .= '<a href="' . $escapedUrl . '">';
 			if (false !== $icon) {
 				if (isset($icon['icon']) && null !== $icon['icon']) {
-					$o .= '<span class="icon">' . $icon['icon'] . '</span>';
+					// Icon data is system-generated from base_module table, not user input
+					// Preserve icon HTML markup (e.g., <i class="fa fa-home"></i>)
+					$safeIcon = $icon['icon'];
+					$o .= '<span class="icon">' . $safeIcon . '</span>';
 				} else {
 					$o .= '<span class="icon"><i class="fa fa-tags"></i></span>';
 				}
 			}
-			$o .= '<span class="text">' . canvastack_underscore_to_camelcase($label) . '</span>';
+			$o .= '<span class="text">' . htmlspecialchars(canvastack_underscore_to_camelcase($label), ENT_QUOTES, 'UTF-8') . '</span>';
 			if (true === $selected) {
 				$o .= '<span class="selected"></span>';
 			}
@@ -378,21 +414,25 @@ if (!function_exists('canvastack_sidebar_category')) {
 	/**
 	 * Create Sidebar Title
 	 *
-	 * @param string $title
-	 * @param string $icon
-	 * @param string $icon_position
+	 * @param string $title Category title
+	 * @param string $icon Icon class
+	 * @param string $icon_position Icon position (left/right)
 	 *
-	 * @return string
+	 * @return string HTML category markup
+	 * 
+	 * @security CRITICAL - Escapes title to prevent XSS
 	 */
 	function canvastack_sidebar_category($title, $icon = false, $icon_position = false) {
 		$o  = '<li class="sidebar-category">';
-		$o .= '<span>' . $title . '</span>';
+		$o .= '<span>' . htmlspecialchars($title, ENT_QUOTES, 'UTF-8') . '</span>';
 		if (false !== $icon) {
 			$position = 'right';
 			if (false !== $icon_position) {
 				$position = $icon_position;
 			}
-			$o .= '<span class="pull-' . $position . '"><i class="fa fa-' . $icon . '"></i></span>';
+			// Escape icon class to prevent XSS
+			$safeIcon = htmlspecialchars($icon, ENT_QUOTES, 'UTF-8');
+			$o .= '<span class="pull-' . htmlspecialchars($position, ENT_QUOTES, 'UTF-8') . '"><i class="fa fa-' . $safeIcon . '"></i></span>';
 		}
 		$o .= '</li>';
 		

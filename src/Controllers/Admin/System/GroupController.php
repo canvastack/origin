@@ -54,27 +54,27 @@ class GroupController extends Controller {
 	 * @return \Illuminate\View\View|\Illuminate\Contracts\View\Factory
 	 */
 	public function index() {
-		$this->setPage();
-		
-		if ('root' !== $this->session['user_group']) {
-			$this->filterPage(['group_name' => 'root'], '!=');
+			$this->setPage();
+
+			if ('root' !== $this->session['user_group']) {
+				$this->filterPage(['group_name' => 'root'], '!=');
+			}
+
+			$this->table->mergeColumns('Group', ['group_info', 'group_name', 'group_alias']);
+
+			$this->table->searchable();
+			$this->table->clickable();
+			$this->table->sortable();
+
+			$this->table->filterGroups('group_name', 'selectbox', true);
+			$this->table->filterGroups('group_alias', 'selectbox', true);
+			$this->table->filterGroups('group_info', 'selectbox', true);
+
+			$this->table->columnCondition('group_name', 'row', '==', $this->session['user_group'], 'background-color', 'rgba(222, 249, 195, 0.51)');
+			$this->table->lists($this->model_table, ['group_info', 'group_name', 'group_alias', 'active']);
+
+			return $this->render();
 		}
-		
-		$this->table->mergeColumns('Group', ['group_info', 'group_name', 'group_alias']);
-		
-		$this->table->searchable();
-		$this->table->clickable();
-		$this->table->sortable();
-		
-		$this->table->filterGroups('group_name', 'selectbox', true);
-		$this->table->filterGroups('group_alias', 'selectbox', true);
-		$this->table->filterGroups('group_info', 'selectbox', true);
-		
-		$this->table->columnCondition('group_name', 'row', '==', $this->session['user_group'], 'background-color', 'rgba(222, 249, 195, 0.51)');
-		$this->table->lists($this->model_table, ['group_info', 'group_name', 'group_alias', 'active']);
-		
-		return $this->render();
-	}
 	
 	/**
 	 * Create Group Data

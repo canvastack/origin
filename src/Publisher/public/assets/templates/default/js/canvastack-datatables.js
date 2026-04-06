@@ -8,6 +8,52 @@
  * @copyright Canvastack
  */
 
+/**
+ * Setup CSRF token for all AJAX requests
+ * This must be called before any AJAX requests are made
+ */
+(function($) {
+    'use strict';
+    
+    // Function to setup CSRF token
+    function setupCsrfToken() {
+        // Get CSRF token from meta tag
+        var token = $('meta[name="csrf-token"]').attr('content');
+        
+        if (token) {
+            // Setup AJAX to include CSRF token in all requests
+            $.ajaxSetup({
+                headers: {
+                    'X-CSRF-TOKEN': token
+                }
+            });
+            
+            console.log('CSRF token configured for AJAX requests');
+            console.log('Token:', token.substring(0, 10) + '...');
+            return true;
+        } else {
+            console.warn('CSRF token not found. Please add <meta name="csrf-token"> to your layout.');
+            return false;
+        }
+    }
+    
+    // Try to setup immediately
+    if (document.readyState === 'loading') {
+        // DOM is still loading, wait for DOMContentLoaded
+        document.addEventListener('DOMContentLoaded', function() {
+            setupCsrfToken();
+        });
+    } else {
+        // DOM is already loaded
+        setupCsrfToken();
+    }
+    
+    // Also setup on jQuery ready (double safety)
+    $(document).ready(function() {
+        setupCsrfToken();
+    });
+})(jQuery);
+
 var CanvastackDataTables = (function($) {
     'use strict';
     
@@ -125,6 +171,95 @@ var CanvastackDataTables = (function($) {
         // Initialize DataTable with the provided configuration
         // DOM layout is controlled by config.datatableConfig.dom (e.g., "lBfrtip")
         try {
+            // Add error handler for AJAX requests
+            if (config.datatableConfig.ajax) {
+                var originalAjax = config.datatableConfig.ajax;
+                
+                config.datatableConfig.ajax = function(data, callback, settings) {
+                    var ajaxConfig = typeof originalAjax === 'string' ? { url: originalAjax } : originalAjax;
+                    
+                    // Get CSRF token from meta tag
+                    var csrfToken = $('meta[name="csrf-token"]').attr('content');
+                    
+                    // Prepare headers
+                    var headers = ajaxConfig.headers || {};
+                    if (csrfToken) {
+                        headers['X-CSRF-TOKEN'] = csrfToken;
+                        console.log('DataTables AJAX: CSRF token added to headers');
+                    } else {
+                        console.error('DataTables AJAX: CSRF token not found!');
+                    }
+                    
+                    // Debug: Log request details
+                    console.log('DataTables AJAX Request:', {
+                        url: ajaxConfig.url,
+                        type: ajaxConfig.type || 'GET',
+                        hasToken: !!csrfToken,
+                        tokenPreview: csrfToken ? csrfToken.substring(0, 10) + '...' : 'none'
+                    });
+                    
+                    $.ajax({
+                        url: ajaxConfig.url,
+                        type: ajaxConfig.type || 'GET',
+                        data: typeof ajaxConfig.data === 'function' ? ajaxConfig.data(data) : data,
+                        headers: headers,
+                        dataType: 'json',
+                        success: function(json) {
+                            // Check if response contains error
+                            if (json.error) {
+                                module.showErrorMessage(tableId, json.error, data);
+                                callback({ draw: data.draw, recordsTotal: 0, recordsFiltered: 0, data: [] });
+                            } else {
+                                callback(json);
+                            }
+                        },
+                        error: function(xhr, error, thrown) {
+                            // Debug: Log error details
+                            console.error('DataTables AJAX Error:', {
+                                status: xhr.status,
+                                statusText: xhr.statusText,
+                                error: error,
+                                thrown: thrown,
+                                responseJSON: xhr.responseJSON
+                            });
+                            
+                            // Return empty data first to let DataTables render
+                            callback({ draw: data.draw, recordsTotal: 0, recordsFiltered: 0, data: [] });
+                            
+                            // Then show error message after a short delay to ensure table is rendered
+                            setTimeout(function() {
+                                // Check if it's a CSRF token mismatch error (HTTP 419)
+                                if (xhr.status === 419 || (xhr.responseJSON && xhr.responseJSON.message && 
+                                    xhr.responseJSON.message.indexOf('CSRF token mismatch') !== -1)) {
+                                    
+                                    console.error('CSRF Token Mismatch detected!');
+                                    console.error('Request headers:', xhr.getAllResponseHeaders());
+                                    
+                                    var errorMessage = {
+                                        message: 'CSRF Token Mismatch - Session may have expired',
+                                        details: 'Please refresh the page to get a new security token',
+                                        status: 419,
+                                        statusText: 'CSRF Token Mismatch'
+                                    };
+                                    
+                                    module.showErrorMessage(tableId, errorMessage, data);
+                                    
+                                    // Announce to screen reader
+                                    module.announceToScreenReader(
+                                        'csrf-error-' + tableId,
+                                        'Security token expired. Please refresh the page.'
+                                    );
+                                } else {
+                                    // Handle other errors normally
+                                    var errorMessage = module.parseAjaxError(xhr, error, thrown);
+                                    module.showErrorMessage(tableId, errorMessage, data);
+                                }
+                            }, 100); // Small delay to ensure DataTables has rendered
+                        }
+                    });
+                };
+            }
+            
             var dtApi = $table.DataTable(config.datatableConfig);
             
             // Handle click actions if configured
@@ -137,10 +272,15 @@ var CanvastackDataTables = (function($) {
                 module.setupFilterButton(tableId, config.filterButton);
             }
             
+            // Apply search enhancements if configured
+            if (config.searchConfig) {
+                module.setupSearchEnhancement(tableId, config.searchConfig, dtApi);
+            }
+            
             return dtApi;
         } catch (error) {
             console.error('CanvastackDataTables: Error initializing DataTable:', error);
-            
+            module.showErrorMessage(tableId, 'Failed to initialize table: ' + error.message, null);
             return null;
         }
     };
@@ -563,6 +703,449 @@ var CanvastackDataTables = (function($) {
                 filterStatusEl.textContent = '';
             }, 3000);
         }
+    };
+    
+    /**
+     * Setup search enhancement with debounce, min length, and highlighting
+     * 
+     * @param {string} tableId - Table element ID
+     * @param {object} config - Search configuration
+     * @param {object} dtApi - DataTable API instance
+     */
+    module.setupSearchEnhancement = function(tableId, config, dtApi) {
+        var debounceDelay = config.debounceDelay || 300;
+        var minSearchLength = config.minSearchLength || 1;
+        var highlightResults = config.highlightResults || false;
+        
+        var searchTimer = null;
+        var $searchInput = $('#' + tableId + '_filter input');
+        
+        if ($searchInput.length === 0) {
+            return;
+        }
+        
+        // Remove default DataTables search handler
+        $searchInput.off('keyup.DT search.DT');
+        
+        // Add debounced search handler
+        $searchInput.on('keyup', function() {
+            var searchTerm = $(this).val();
+            
+            // Clear previous timer
+            clearTimeout(searchTimer);
+            
+            // Check minimum length
+            if (searchTerm.length > 0 && searchTerm.length < minSearchLength) {
+                // Show hint to user
+                module.announceToScreenReader(
+                    'search-hint-' + tableId,
+                    'Please enter at least ' + minSearchLength + ' characters to search'
+                );
+                return;
+            }
+            
+            // Debounce search
+            searchTimer = setTimeout(function() {
+                // Perform search
+                dtApi.search(searchTerm).draw();
+                
+                // Announce results
+                var info = dtApi.page.info();
+                var message = searchTerm.length > 0
+                    ? 'Search results: ' + info.recordsDisplay + ' records found'
+                    : 'Showing all ' + info.recordsTotal + ' records';
+                
+                module.announceToScreenReader('search-results-' + tableId, message);
+                
+                // Highlight results
+                if (highlightResults && searchTerm.length > 0) {
+                    module.highlightSearchTerm(tableId, searchTerm);
+                }
+            }, debounceDelay);
+        });
+        
+        // Handle Enter key for immediate search
+        $searchInput.on('keydown', function(e) {
+            if (e.keyCode === 13) { // Enter key
+                clearTimeout(searchTimer);
+                var searchTerm = $(this).val();
+                
+                if (searchTerm.length === 0 || searchTerm.length >= minSearchLength) {
+                    dtApi.search(searchTerm).draw();
+                }
+                
+                e.preventDefault();
+            }
+        });
+    };
+    
+    /**
+     * Highlight search term in table cells
+     * 
+     * @param {string} tableId - Table DOM ID
+     * @param {string} searchTerm - Term to highlight
+     */
+    module.highlightSearchTerm = function(tableId, searchTerm) {
+        var $table = $('#' + tableId);
+        
+        // Remove previous highlights
+        $table.find('.search-highlight').contents().unwrap();
+        
+        if (!searchTerm || searchTerm.length === 0) {
+            return;
+        }
+        
+        // Escape special regex characters
+        var escapedTerm = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        var regex = new RegExp('(' + escapedTerm + ')', 'gi');
+        
+        // Highlight in visible cells
+        $table.find('tbody td').each(function() {
+            var $cell = $(this);
+            var html = $cell.html();
+            
+            // Skip cells with complex HTML (buttons, images, etc.)
+            if (html.indexOf('<') !== -1) {
+                return;
+            }
+            
+            // Apply highlight
+            var highlighted = html.replace(regex, '<mark class="search-highlight">$1</mark>');
+            if (highlighted !== html) {
+                $cell.html(highlighted);
+            }
+        });
+    };
+    
+    /**
+     * Announce message to screen readers
+     * 
+     * @param {string} regionId - ARIA live region ID
+     * @param {string} message - Message to announce
+     */
+    module.announceToScreenReader = function(regionId, message) {
+        var $region = $('#' + regionId);
+        
+        if ($region.length === 0) {
+            // Create live region if it doesn't exist
+            $region = $('<div>', {
+                id: regionId,
+                'class': 'sr-only',
+                'role': 'status',
+                'aria-live': 'polite',
+                'aria-atomic': 'true'
+            }).appendTo('body');
+        }
+        
+        // Clear and set new message
+        $region.text('');
+        setTimeout(function() {
+            $region.text(message);
+        }, 100);
+    };
+    
+    /**
+     * Parse AJAX error and return user-friendly message
+     * 
+     * @param {object} xhr - XMLHttpRequest object
+     * @param {string} error - Error type
+     * @param {string} thrown - Error message thrown
+     * @returns {string} User-friendly error message
+     */
+    module.parseAjaxError = function(xhr, error, thrown) {
+        var errorMessage = '';
+        var errorDetails = '';
+        
+        // Parse response JSON if available
+        if (xhr.responseJSON) {
+            if (xhr.responseJSON.message) {
+                errorMessage = xhr.responseJSON.message;
+            }
+            if (xhr.responseJSON.exception) {
+                errorDetails = xhr.responseJSON.exception;
+            }
+            if (xhr.responseJSON.file) {
+                errorDetails += ' in ' + xhr.responseJSON.file;
+            }
+            if (xhr.responseJSON.line) {
+                errorDetails += ' on line ' + xhr.responseJSON.line;
+            }
+        } else if (xhr.responseText) {
+            // Try to parse as JSON first
+            try {
+                var jsonResponse = JSON.parse(xhr.responseText);
+                if (jsonResponse.message) {
+                    errorMessage = jsonResponse.message;
+                }
+                if (jsonResponse.exception) {
+                    errorDetails = jsonResponse.exception;
+                }
+            } catch (e) {
+                // Not JSON, try to extract error from HTML response
+                try {
+                    var $response = $(xhr.responseText);
+                    var errorText = $response.find('.exception-message').text() || 
+                                   $response.find('h1').first().text() ||
+                                   xhr.statusText;
+                    errorMessage = errorText;
+                } catch (e2) {
+                    // If jQuery parsing fails, use statusText
+                    errorMessage = xhr.statusText || 'Unknown error';
+                }
+            }
+        }
+        
+        // Fallback to generic error
+        if (!errorMessage) {
+            errorMessage = 'An error occurred while loading table data';
+        }
+        
+        // Add HTTP status if available
+        if (xhr.status) {
+            errorMessage = '[HTTP ' + xhr.status + '] ' + errorMessage;
+        }
+        
+        return {
+            message: errorMessage,
+            details: errorDetails,
+            status: xhr.status,
+            statusText: xhr.statusText
+        };
+    };
+    
+    /**
+     * Show error message in table body with refresh button
+     * 
+     * @param {string} tableId - Table element ID
+     * @param {string|object} error - Error message or error object
+     * @param {object} requestData - Original request data for retry
+     */
+    module.showErrorMessage = function(tableId, error, requestData) {
+        console.log('showErrorMessage called:', {
+            tableId: tableId,
+            error: error,
+            requestData: requestData
+        });
+        
+        var $table = $('#' + tableId);
+        var $wrapper = $table.closest('.dataTables_wrapper');
+        var $tbody = $table.find('tbody');
+        
+        console.log('Table elements found:', {
+            table: $table.length,
+            wrapper: $wrapper.length,
+            tbody: $tbody.length
+        });
+        
+        // Parse error if it's an object
+        var errorMessage = typeof error === 'object' ? error.message : error;
+        var errorDetails = typeof error === 'object' ? error.details : '';
+        var errorStatus = typeof error === 'object' ? error.status : null;
+        
+        console.log('Error details:', {
+            message: errorMessage,
+            details: errorDetails,
+            status: errorStatus
+        });
+        
+        // Determine error type and icon
+        var errorIcon = 'fa-exclamation-triangle';
+        var errorColor = '#d9534f';
+        var errorTitle = 'Error Loading Table Data';
+        
+        if (errorStatus === 500) {
+            errorIcon = 'fa-server';
+            errorTitle = 'Server Error';
+        } else if (errorStatus === 419) {
+            errorIcon = 'fa-shield';
+            errorTitle = 'Security Token Expired';
+            errorColor = '#f0ad4e';
+        } else if (errorStatus === 404) {
+            errorIcon = 'fa-search';
+            errorTitle = 'Not Found';
+        } else if (errorStatus === 403) {
+            errorIcon = 'fa-lock';
+            errorTitle = 'Access Denied';
+            errorColor = '#f0ad4e';
+        } else if (errorStatus === 0 || errorStatus === null) {
+            errorIcon = 'fa-plug';
+            errorTitle = 'Connection Error';
+        }
+        
+        // Check if error is CSRF token related
+        if (errorStatus === 419 || errorMessage.indexOf('CSRF token mismatch') !== -1 || 
+            errorMessage.indexOf('CSRF Token Mismatch') !== -1) {
+            errorIcon = 'fa-shield';
+            errorTitle = 'Security Token Expired';
+            errorColor = '#f0ad4e';
+        }
+        
+        // Check if error is database connection related
+        if (errorMessage.indexOf('Access denied') !== -1 || 
+            errorMessage.indexOf('Connection refused') !== -1 ||
+            errorMessage.indexOf('SQLSTATE') !== -1) {
+            errorIcon = 'fa-database';
+            errorTitle = 'Database Connection Error';
+            errorColor = '#d9534f';
+        }
+        
+        // Determine color class
+        var colorClass = errorColor === '#f0ad4e' ? 'orange' : 'red';
+        
+        // Create error message HTML using CSS classes
+        var errorHtml = 
+            '<tr class="canvastack-table-error-row">' +
+            '<td colspan="100">' +
+            '<div class="canvastack-error-container">' +
+            '<div class="canvastack-error-icon">' +
+            '<i class="fa ' + errorIcon + ' fa-4x canvastack-error-icon-' + colorClass + '"></i>' +
+            '</div>' +
+            '<h4 class="canvastack-error-title canvastack-error-title-' + colorClass + '">' + errorTitle + '</h4>' +
+            '<div class="canvastack-error-message-box canvastack-error-message-box-' + colorClass + '">' +
+            '<p class="canvastack-error-label">Error Message:</p>' +
+            '<p class="canvastack-error-text">' + 
+            module.escapeHtml(errorMessage) + 
+            '</p>';
+        
+        // Add error details if available
+        if (errorDetails) {
+            errorHtml += 
+                '<p class="canvastack-error-details-label">Technical Details:</p>' +
+                '<p class="canvastack-error-details-text">' + 
+                module.escapeHtml(errorDetails) + 
+                '</p>';
+        }
+        
+        errorHtml += '</div>';
+        
+        // Add helpful suggestions based on error type
+        if (errorMessage.indexOf('Access denied') !== -1 || errorMessage.indexOf('SQLSTATE') !== -1) {
+            errorHtml += 
+                '<div class="canvastack-error-suggestions">' +
+                '<p class="canvastack-error-suggestions-label"><i class="fa fa-lightbulb-o"></i> <strong>Possible Solutions:</strong></p>' +
+                '<ul class="canvastack-error-suggestions-list">' +
+                '<li>Check database connection settings in <code>.env</code> file</li>' +
+                '<li>Verify database server is running</li>' +
+                '<li>Confirm database credentials are correct</li>' +
+                '<li>Check if database exists and is accessible</li>' +
+                '</ul>' +
+                '</div>';
+        } else if (errorStatus === 419 || errorMessage.indexOf('CSRF token mismatch') !== -1 || 
+                   errorMessage.indexOf('CSRF Token Mismatch') !== -1) {
+            errorHtml += 
+                '<div class="canvastack-error-suggestions">' +
+                '<p class="canvastack-error-suggestions-label"><i class="fa fa-lightbulb-o"></i> <strong>Possible Solutions:</strong></p>' +
+                '<ul class="canvastack-error-suggestions-list">' +
+                '<li><strong>Refresh the page</strong> to get a new security token</li>' +
+                '<li>Your session may have expired - try logging in again</li>' +
+                '<li>Clear browser cache and cookies if problem persists</li>' +
+                '<li>Contact administrator if you continue to see this error</li>' +
+                '</ul>' +
+                '</div>';
+        } else if (errorStatus === 500) {
+            errorHtml += 
+                '<div class="canvastack-error-suggestions">' +
+                '<p class="canvastack-error-suggestions-label"><i class="fa fa-lightbulb-o"></i> <strong>Possible Solutions:</strong></p>' +
+                '<ul class="canvastack-error-suggestions-list">' +
+                '<li>Check server logs for detailed error information</li>' +
+                '<li>Verify all required services are running</li>' +
+                '<li>Contact system administrator if problem persists</li>' +
+                '</ul>' +
+                '</div>';
+        }
+        
+        // Add refresh button
+        errorHtml += 
+            '<div class="canvastack-error-actions">' +
+            '<button class="btn btn-primary canvastack-table-refresh-btn" data-table-id="' + tableId + '">' +
+            '<i class="fa fa-refresh"></i> Refresh Table' +
+            '</button>' +
+            '</div>' +
+            '<div class="canvastack-error-help">' +
+            '<small class="canvastack-error-help-text">If the problem persists, please contact support or check the browser console for more details.</small>' +
+            '</div>' +
+            '</div>' +
+            '</td>' +
+            '</tr>';
+        
+        // Clear existing content and show error
+        console.log('Setting error HTML to tbody, length:', errorHtml.length);
+        $tbody.html(errorHtml);
+        console.log('Error HTML set, tbody content:', $tbody.html().substring(0, 100) + '...');
+        
+        // Hide processing indicator
+        $wrapper.find('.dataTables_processing').hide();
+        
+        // Setup refresh button handler
+        $('.canvastack-table-refresh-btn').off('click').on('click', function() {
+            var btnTableId = $(this).data('table-id');
+            console.log('Refresh button clicked for table:', btnTableId);
+            module.refreshTable(btnTableId);
+        });
+        
+        console.log('Error message displayed successfully');
+        
+        // Announce error to screen readers
+        module.announceToScreenReader(
+            'table-error-' + tableId,
+            'Error loading table data: ' + errorMessage + '. Please use the refresh button to try again.'
+        );
+    };
+    
+    /**
+     * Refresh table by reloading data
+     * 
+     * @param {string} tableId - Table element ID
+     */
+    module.refreshTable = function(tableId) {
+        var $table = $('#' + tableId);
+        
+        // Check if DataTable is initialized
+        if ($.fn.DataTable.isDataTable($table)) {
+            var dtApi = $table.DataTable();
+            
+            // Show loading indicator
+            var $wrapper = $table.closest('.dataTables_wrapper');
+            $wrapper.find('.dataTables_processing').show();
+            
+            // Clear error row
+            $table.find('.canvastack-table-error-row').remove();
+            
+            // Reload data
+            dtApi.ajax.reload(function(json) {
+                // Hide loading indicator
+                $wrapper.find('.dataTables_processing').hide();
+                
+                // Announce success
+                module.announceToScreenReader(
+                    'table-refresh-' + tableId,
+                    'Table data refreshed successfully'
+                );
+            }, false); // false = don't reset paging
+        } else {
+            // If DataTable not initialized, reload the page
+            window.location.reload();
+        }
+    };
+    
+    /**
+     * Escape HTML to prevent XSS
+     * 
+     * @param {string} text - Text to escape
+     * @returns {string} Escaped text
+     */
+    module.escapeHtml = function(text) {
+        if (!text) return '';
+        
+        var map = {
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#039;'
+        };
+        
+        return text.toString().replace(/[&<>"']/g, function(m) { return map[m]; });
     };
     
     return module;

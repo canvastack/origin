@@ -25,11 +25,14 @@ class UserController extends Controller {
 	private $user_groups;
 	
 	public $group_id;
-	public $validations	= [];
 	public $importPage  = false;
 	
 	public function __construct($import = false) {
 		parent::__construct(User::class, 'system.accounts.user');
+		
+		// Get max file size from config (in KB)
+		$maxFileSizeBytes = config('canvastack.controller.security.max_file_size', 10485760); // 10MB default
+		$maxFileSizeKB = intval($maxFileSizeBytes / 1024); // Convert to KB for validation
 		
 		$this->setValidations (
 			[
@@ -38,13 +41,13 @@ class UserController extends Controller {
 				'email'    => 'required|unique:users',
 				'password' => 'required',
 				'group_id' => 'required_if:base_group,0|not_in:0',
-				'photo'    => canvastack_image_validations(2000)
+				'photo'    => canvastack_image_validations($maxFileSizeKB)
 			], [
 				'username' => 'required',
 				'fullname' => 'required|min:1',
 				'email'    => 'required',
 				'group_id' => 'required_if:base_group,0|not_in:0',
-				'photo'    => canvastack_image_validations(2000)
+				'photo'    => canvastack_image_validations($maxFileSizeKB)
 			]
 		);
 	}
@@ -56,28 +59,28 @@ class UserController extends Controller {
 		];
 	}
 	
-	public function index() {
-		$this->setPage();
-		
-		if (!$this->is_root && !canvastack_string_contained($this->session['user_group'], 'admin')) {
-			return self::redirect("{$this->session['id']}/edit");
+	public function index(): \Illuminate\View\View|\Illuminate\Http\JsonResponse|\Illuminate\Http\RedirectResponse {
+			$this->setPage();
+
+			if (!$this->is_root && !canvastack_string_contained($this->session['user_group'], 'admin')) {
+				return self::redirect("{$this->session['id']}/edit");
+			}
+
+			$this->table->searchable();
+			$this->table->clickable();
+			$this->table->sortable();
+
+			$this->table->relations($this->model, 'group', 'group_info', self::key_relations());
+			$this->table->relations($this->model, 'group', 'group_name', self::key_relations());
+
+			$this->table->filterGroups('username', 'selectbox', true);
+			$this->table->filterGroups('group_info', 'selectbox', true);
+			$this->table->orderby('id', 'DESC');
+
+			$this->table->lists($this->model_table, ['username:User', 'email', 'group_info', 'group_name', 'address', 'phone', 'expire_date', 'active']);
+
+			return $this->render();
 		}
-		
-		$this->table->searchable();
-		$this->table->clickable();
-		$this->table->sortable();
-		
-		$this->table->relations($this->model, 'group', 'group_info', self::key_relations());
-		$this->table->relations($this->model, 'group', 'group_name', self::key_relations());
-		
-		$this->table->filterGroups('username', 'selectbox', true);
-		$this->table->filterGroups('group_info', 'selectbox', true);
-		$this->table->orderby('id', 'DESC');
-		
-		$this->table->lists($this->model_table, ['username:User', 'email', 'group_info', 'group_name', 'address', 'phone', 'expire_date', 'active']);
-		
-		return $this->render();
-	}
 	
 	public function create() {
 		$this->setPage();

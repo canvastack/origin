@@ -34,6 +34,59 @@ class Template extends Scripts {
         $this->templateScripts('css');
     }
     
+    /**
+     * Apply script concatenation to all loaded scripts
+     * 
+     * This method can be called from View trait before rendering to ensure
+     * concatenation is applied to all scripts added by the controller.
+     * 
+     * @return void
+     */
+    public function applyScriptConcatenation(): void {
+        // Check if concatenation is enabled
+        $config = config('canvastack.controller.script_management', []);
+        $concatenationEnabled = $config['enable_concatenation'] ?? false;
+        
+        error_log('=== applyScriptConcatenation() called ===');
+        error_log('Concatenation enabled: ' . ($concatenationEnabled ? 'YES' : 'NO'));
+        
+        if (!$concatenationEnabled) {
+            error_log('Concatenation DISABLED - returning early');
+            return;
+        }
+        
+        // Debug logging
+        if (config('app.debug', false)) {
+            \Log::info('Template: Applying concatenation in constructor', [
+                'js_positions' => isset($this->scripts['js']) ? array_keys($this->scripts['js']) : [],
+                'js_count_before' => isset($this->scripts['js']) ? array_sum(array_map('count', $this->scripts['js'])) : 0
+            ]);
+        }
+        
+        // Apply concatenation to JavaScript scripts
+        // IMPORTANT: Process ALL positions, not just the ones from templateScripts()
+        if (isset($this->scripts['js'])) {
+            error_log('Processing JS scripts...');
+            error_log('Available positions: ' . implode(', ', array_keys($this->scripts['js'])));
+            
+            foreach ($this->scripts['js'] as $position => $scripts) {
+                error_log("Processing position: {$position} with " . count($scripts) . " scripts");
+                $result = $this->concatenateScripts($scripts, $position);
+                $this->scripts['js'][$position] = $result;
+                error_log("After concatenation: {$position} now has " . count($this->scripts['js'][$position]) . " scripts");
+            }
+        } else {
+            error_log('NO JS scripts found!');
+        }
+        
+        // Debug logging
+        if (config('app.debug', false)) {
+            \Log::info('Template: Concatenation applied', [
+                'js_count_after' => isset($this->scripts['js']) ? array_sum(array_map('count', $this->scripts['js'])) : 0
+            ]);
+        }
+    }
+    
     private function templatePath($scriptPath) {
         return "{$this->assetPath}/{$scriptPath}";
     }

@@ -23,8 +23,11 @@ class CanvastackServiceProvider extends ServiceProvider {
 	 * @return void
 	 */
 	public function boot() {
-		if ($this->app->routesAreCached()) {
-			require_once __DIR__ . '/routes/web.php';
+		// Load routes only if NOT cached
+		// When routes are cached, Laravel uses bootstrap/cache/routes-v7.php instead
+		if (!$this->app->routesAreCached()) {
+			// Routes are defined in app's routes/web.php, not in package
+			// No need to load routes here as they're loaded by RouteServiceProvider
 		}
 
 		$this->loadViewsFrom(base_path('resources/views'), 'CanvaStack');

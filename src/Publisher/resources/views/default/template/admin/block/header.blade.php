@@ -79,7 +79,7 @@ $assetURL     = "{$baseUrl}/{$baseTemplate}/{$template}";
 								</ul>
 							</div>
 						</div>
+						{!! $breadcrumbs !!}
 					</div>
 				</div>
-				{!! $breadcrumbs !!}
 				<!-- HEADER BLOCK CLOSE  -->

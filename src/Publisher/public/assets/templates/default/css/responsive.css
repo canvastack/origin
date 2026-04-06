@@ -603,9 +603,7 @@
         width: 286px;
         right: -160px!important;
     }
-    .page-title-area {
-        padding: 15px 30px 0;
-    }
+    /* Breadcrumb is now inside header-area, no need for separate styling */
     /* fact area */
     .s-report-inner {
         padding-left: 20px;

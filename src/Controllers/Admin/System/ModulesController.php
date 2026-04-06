@@ -128,23 +128,23 @@ class ModulesController extends Controller {
 		}
 	}
 	
-	public function index() {
-		$this->setPage();
-		
-		$this->table->mergeColumns('Module', ['module_name', 'parent_name']);
-		
-		$this->table->searchable(['module_name', 'route_path']);
-		$this->table->clickable();
-		$this->table->sortable();
-		
-		$this->table->filterGroups('module_name', 'selectbox', true);
-		$this->table->filterGroups('route_path', 'selectbox', true);
-		
-		$this->table->lists($this->model_table, ['module_name', 'parent_name', 'route_path', 'flag_status', 'active']);
-		$this->table->clear();
-		
-		return $this->render();
-	}
+	public function index(): \Illuminate\View\View|\Illuminate\Http\JsonResponse {
+			$this->setPage();
+
+			$this->table->mergeColumns('Module', ['module_name', 'parent_name']);
+
+			$this->table->searchable(['module_name', 'route_path']);
+			$this->table->clickable();
+			$this->table->sortable();
+
+			$this->table->filterGroups('module_name', 'selectbox', true);
+			$this->table->filterGroups('route_path', 'selectbox', true);
+
+			$this->table->lists($this->model_table, ['module_name', 'parent_name', 'route_path', 'flag_status', 'active']);
+			$this->table->clear();
+
+			return $this->render();
+		}
 	
 	public function create() {
 		$this->setPage();

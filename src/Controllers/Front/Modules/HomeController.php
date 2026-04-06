@@ -16,18 +16,17 @@ use Canvastack\Origin\Controllers\Core\Controller;
  
 class HomeController extends Controller {
 	private $name = 'home';
-	public $model				= [];
     
 	public function __construct() {
 		parent::__construct();
 		
 	}
 	
-	public function index() {
-		$this->meta->title('Development');
-		
-		return $this->render();
-	}
+	public function index(): \Illuminate\View\View|\Illuminate\Http\JsonResponse {
+			$this->meta->title('Development');
+
+			return $this->render();
+		}
 	
 	public function create() {
 		$this->meta->title('Development');

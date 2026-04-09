@@ -206,12 +206,33 @@ class MappingPage extends Model {
 		}
 		
 		if (is_array($requests)) {
+			// Validate that requests array is not empty
+			if (empty($requests)) {
+				\Log::warning('Empty requests array in queryFieldValues', [
+					'tablename' => $tablename
+				]);
+				
+				return [
+					'data' => [],
+					'fieldset' => []
+				];
+			}
+			
 			foreach ($requests as $request) {
 				
 				$fieldNameValue     = $request;
 				if (canvastack_string_contained($request, '::')) {
 					$explode         = explode('::', $request);
 					$fieldNameValue  = $explode[1];
+				}
+				
+				// Validate field name is not empty
+				if (empty($fieldNameValue)) {
+					\Log::warning('Empty field name in queryFieldValues', [
+						'tablename' => $tablename,
+						'request' => $request
+					]);
+					continue;
 				}
 				
 				$rows['table_name'] = $tablename;
@@ -221,13 +242,51 @@ class MappingPage extends Model {
 				$sql      = "SELECT `{$rows['field_name']}` FROM {$rows['table_name']} WHERE `{$rows['field_name']}` IS NOT NULL GROUP BY `{$rows['field_name']}`;";
 			}
 		} else {
+			// Validate that requests is not empty
+			if (empty($requests)) {
+				\Log::warning('Empty requests string in queryFieldValues', [
+					'tablename' => $tablename
+				]);
+				
+				return [
+					'data' => [],
+					'fieldset' => []
+				];
+			}
+			
 			$explode = explode('::', $requests);
 			
 			$rows['table_name'] = explode($node, $explode[0])[0];
-			$rows['field_name'] = $explode[1];
+			$rows['field_name'] = $explode[1] ?? '';
+			
+			// Validate field name is not empty
+			if (empty($rows['field_name'])) {
+				\Log::warning('Empty field name after parsing in queryFieldValues', [
+					'tablename' => $tablename,
+					'requests' => $requests
+				]);
+				
+				return [
+					'data' => [],
+					'fieldset' => []
+				];
+			}
 			
 			$fieldset = $rows['field_name'];
 			$sql      = "SELECT `{$rows['field_name']}` FROM {$rows['table_name']} WHERE `{$rows['field_name']}` IS NOT NULL GROUP BY `{$rows['field_name']}`;";
+		}
+		
+		// Final validation before executing query
+		if (empty($sql) || empty($fieldset)) {
+			\Log::warning('No valid SQL generated in queryFieldValues', [
+				'tablename' => $tablename,
+				'requests' => $requests
+			]);
+			
+			return [
+				'data' => [],
+				'fieldset' => []
+			];
 		}
 		
 		$data             = [];

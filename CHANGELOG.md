@@ -10,6 +10,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 🔒 Security Enhancements
 
 #### Added
+- **Group Management Security**
+  - CSRF token validation for AJAX rolemapage requests
+  - Root group protection (non-root users cannot modify root group)
+  - Input validation for group IDs and AJAX parameters
+  - Security event logging for unauthorized access attempts
+  - Constant-time CSRF token comparison to prevent timing attacks
+  
+- **New Exception Classes**
+  - `CSRFException` - CSRF token validation failures (HTTP 419)
+  - `ControllerException` - General controller errors (HTTP 500)
+  - `ControllerValidationException` - Input validation failures (HTTP 422)
+  
+- **Privilege Management Constants**
+  - `PrivilegeConstants` class with bitwise privilege flags
+  - READ (8), WRITE (4), MODIFY (2), DELETE (1)
+  - Helper methods for privilege validation and checking
+  - Centralized privilege constant management
+
 - **CSRF Protection** - Comprehensive CSRF token validation across all controllers
 - **XSS Prevention** - Enhanced output escaping and input sanitization
 - **SQL Injection Protection** - Parameterized queries and input validation
@@ -17,15 +35,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Security Helper** - New `Security.php` helper with security utilities
 
 #### Changed
+- **GroupController.php** - Major refactoring with comprehensive improvements:
+  - Added database transaction management for data consistency
+  - Implemented root group protection with authorization checks
+  - Enhanced CSRF validation for AJAX requests
+  - Added comprehensive error handling with try-catch blocks
+  - Improved logging for all operations (create, update, delete)
+  - Added cache invalidation after group modifications
+  - Enhanced input validation with proper exception handling
+  - Added type hints and return types for all methods
+  - Improved PHPDoc documentation with examples
+  
+- **Privileges.php** (Admin/System/Includes) - Complete privilege management overhaul:
+  - Refactored `privileges_before_insert()` with improved data structure
+  - Enhanced `privileges_after_insert()` with "clear first, then apply" strategy
+  - Added comprehensive PHPDoc with examples and security notes
+  - Improved error handling and logging
+  - Added menu caching with 1-hour TTL
+  - Implemented `invalidateMenuCache()` for cache management
+  - Enhanced privilege checkbox rendering with proper escaping
+  - Added validation for module routes and privilege data
+  - Improved code organization and readability
+  
+- **MappingPage.php** (Admin/System/Includes) - Enhanced page mapping functionality:
+  - Refactored `mapping_before_insert()` with better data validation
+  - Improved error handling and logging throughout
+  - Added hierarchical row building methods (buildParentRow, buildChildRows, buildSubChildRows)
+  - Enhanced AJAX URL generation with security validation
+  - Added `invalidateMappingCache()` for cache management
+  - Improved module title formatting with XSS protection
+  - Enhanced PHPDoc documentation with security notes
+  - Better handling of empty data and edge cases
+  
+- **MappingPage.php** (Model) - Enhanced field value query validation:
+  - Added validation for empty requests array
+  - Added validation for empty field names
+  - Added validation before SQL execution
+  - Improved error logging for debugging
+  - Better handling of edge cases and malformed data
+
 - Updated all controllers with security improvements:
   - `FormController.php` - Added CSRF and input validation
   - `ProductController.php` - Enhanced security checks
-  - `GroupController.php` - Improved authorization
   - `ModulesController.php` - Added security validation
   - `PreferenceController.php` - Enhanced input sanitization
   - `UserActivityController.php` - Added security logging
   - `UserController.php` - Improved authentication checks
-  - `Privileges.php` (Admin/System/Includes) - Enhanced permission checks
   - `Privileges.php` (Core/Craft/Includes) - Improved security validation
 - Updated core components:
   - `Controller.php` - Added security middleware integration
@@ -72,6 +127,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 📚 Documentation
 
 #### Added
+- **Group Management Documentation**
+  - `docs/CORE/GROUP/CACHING_STRATEGY_GUIDE.md` - Caching strategies for groups
+  - `docs/CORE/GROUP/CODE_QUALITY_STANDARDS_GUIDE.md` - Code quality standards
+  - `docs/CORE/GROUP/CODE_REVIEW_CHECKLIST.md` - Code review guidelines
+  - `docs/CORE/GROUP/MIGRATION_GUIDE.md` - Group management migration guide
+  - `docs/CORE/GROUP/SECURITY_BEST_PRACTICES.md` - Security best practices
+  - `docs/CORE/GROUP/SECURITY_TRAINING_PRESENTATION.md` - Security training materials
+  - `docs/CORE/GROUP/TRANSACTION_MANAGEMENT_GUIDE.md` - Transaction management guide
+
 - **Component Documentation**
   - `docs/COMPONENTS/TOOLS/CACHE_MANAGEMENT.md` - Cache management guide
   - Enhanced component documentation structure
@@ -112,6 +176,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 🔧 Configuration
 
 #### Added
+- **New Library Components**:
+  - `src/Library/Exceptions/CSRFException.php` - CSRF validation exception
+  - `src/Library/Exceptions/ControllerException.php` - General controller exception
+  - `src/Library/Exceptions/ControllerValidationException.php` - Validation exception
+  - `src/Library/Constants/PrivilegeConstants.php` - Privilege constants and helpers
+
 - New configuration files:
   - `config/canvastack.controller.php` - Controller configuration
   - `config/canvastack.monitoring.php` - Monitoring configuration
@@ -133,6 +203,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Improved `Template.php` helper with better template handling
 
 ### 🐛 Fixed
+- **Group Management Fixes**
+  - Fixed privilege data structure handling in `privileges_before_insert()`
+  - Fixed "clear all privileges" functionality when no modules selected
+  - Fixed mapping data processing for empty datasets
+  - Fixed cache invalidation timing (now after transaction commit)
+  - Fixed error handling in privilege and mapping operations
+  - Fixed validation for group IDs and AJAX parameters
+  
+- **Security Fixes**
+  - Fixed CSRF token validation for AJAX requests
+  - Fixed XSS vulnerabilities in module name display
+  - Fixed SQL injection risks in privilege queries
+  - Fixed unauthorized access to root group modifications
+  
+- **Data Consistency Fixes**
+  - Fixed transaction management to prevent partial updates
+  - Fixed privilege clearing strategy (UPDATE to NULL instead of DELETE)
+  - Fixed mapping data validation and error handling
+  - Fixed empty field name handling in MappingPage model
+
 - Security vulnerabilities across multiple controllers
 - XSS issues in view rendering
 - File upload security issues

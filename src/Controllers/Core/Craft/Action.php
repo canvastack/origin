@@ -485,7 +485,24 @@ trait Action {
 		// Clean up large variables to free memory
 		unset($config, $DataTables, $postData, $object);
 		
-		// Return result directly (already JSON response from Yajra DataTables)
+		// Wrap result in JsonResponse if it's an array
+		// The Datatables::process() method returns an array, not a JsonResponse
+		if (is_array($result)) {
+			return response()->json($result);
+		}
+		
+		// If result is null (error case), return error response
+		if ($result === null) {
+			return response()->json([
+				'draw' => 0,
+				'recordsTotal' => 0,
+				'recordsFiltered' => 0,
+				'data' => [],
+				'error' => 'Failed to process DataTables request'
+			], 500);
+		}
+		
+		// If result is already a JsonResponse, return it
 		return $result;
 	}
 	

@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 🐛 Bug Fixes
+
+#### Fixed
+- **UserController.php** - Filter groups and email handling improvements:
+  - Fixed filterGroups chain configuration (group_name → group_info)
+  - Removed username from filter dropdown (now searchable via search box)
+  - Fixed email sending to use direct Email Objects instance instead of $this->email
+  - Added comprehensive error handling and logging for email failures
+  - Added validation for empty credential_info in email templates
+  - Ensured model_data loads with group relation in edit method
+  - Improved column labels in table lists (group_name:Group, group_info:Info)
+
+- **Datatables.php** - Relationship loading and eager loading fixes:
+  - Fixed errors when using custom relational fields (via JOINs) instead of Eloquent relationships
+  - Added `filterValidRelations()` method to validate model relationships before eager loading
+  - Prevented "Relationship does not exist" errors for non-existent Eloquent relations
+  - Improved relationship caching with better validation
+  - Enhanced lazy loading threshold handling for large datasets
+  - Better logging for relationship loading decisions
+
+- **Search.php & QueryBuilder.php** - Search functionality improvements:
+  - Enhanced query builder validation and error handling
+  - Improved search term sanitization
+  - Better handling of complex search queries
+
+- **Objects.php** - Table objects validation improvements:
+  - Enhanced validation for table operations
+  - Better error handling for edge cases
+
+- **Action.php** - Action handling improvements:
+  - Improved action validation and processing
+  - Enhanced error handling
+
+### 🚀 New Features
+
+#### Added
+- **Group.php Model** - New helper method:
+  - Added `getFirstRouteOptions($groupId)` method for form sync
+  - Returns array of route_path => module_name for dropdown options
+  - Supports group-based route filtering with proper joins
+
+### 🔄 Refactoring
+
+#### Changed
+- **AjaxController.php** - Major security hardening and code organization:
+  - Added comprehensive PHPDoc documentation for all methods and properties
+  - Added security annotations (@security CRITICAL) for sensitive operations
+  - Imported required exception classes (CSRFException, ControllerValidationException, SQLInjectionAttemptException)
+  - Added proper type hints for class properties ($ajaxConnection, $datatables, $charts)
+  - Improved code structure with better organization and readability
+  - Enhanced error handling with proper exception handling
+  - Added logging support with Illuminate\Support\Facades\Log
+  - Added cache management support
+  - Updated version to 2.0.0 with security hardening notes
+  - Maintained backward compatibility (100%)
+
 ### 🔒 Security Enhancements
 
 #### Added

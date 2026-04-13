@@ -1943,74 +1943,80 @@ class Datatables {
 		// Extract and optimize relation names
 		$relationNames = $this->extractRelationNames($relations);
 		
-		if (!empty($relationNames)) {
-			// Phase 3: Check lazy loading threshold
-			$lazyThreshold = config('canvastack.datatables.relationships.lazy_loading_threshold', 100);
-			$estimatedRows = $model_data->count();
-			
-			if ($estimatedRows > $lazyThreshold) {
-				\Log::info('Datatables: Skipping eager loading due to threshold', [
-					'table' => $table_name,
-					'rows' => $estimatedRows,
-					'threshold' => $lazyThreshold,
-					'relations' => $relationNames
-				]);
-				return $model_data; // Skip eager loading for large datasets
-			}
-			
-			// PERFORMANCE: Check if relationships cache is enabled
-			if ($this->shouldUseCache('relationships') && config('canvastack.cache.relationships.cache_definitions', true)) {
-				$cacheKey = config('canvastack.cache.prefix', 'canvastack_') . 
-				            config('canvastack.cache.relationships.key_prefix', 'relationships_') . 
-				            $table_name . '_' . md5(serialize($relationNames));
-				
-				// Phase 3: Use relationship-specific cache TTL
-				$cacheTtl = config('canvastack.datatables.relationships.relationship_cache_ttl', 
-				                   config('canvastack.cache.relationships.ttl', 3600));
-				
-				// Try to get from cache
-				$cached = \Illuminate\Support\Facades\Cache::get($cacheKey);
-				if ($cached !== null) {
-					canvastack_table_cache_monitor('get', $cacheKey, true);
-					
-					if (config('canvastack.cache.development.log_operations', false)) {
-						\Log::debug('Cache HIT: Relationships', ['table' => $table_name, 'key' => $cacheKey]);
-					}
-					
-					return $model_data->with($cached);
-				}
-				
-				canvastack_table_cache_monitor('get', $cacheKey, false);
-				
-				// Cache the relation names for future use
-				try {
-					\Illuminate\Support\Facades\Cache::put($cacheKey, $relationNames, $cacheTtl);
-				} catch (\Exception $e) {
-					error_log('Datatables::applyEagerLoading() cache write failed: ' . $e->getMessage());
-				}
-			}
-			
-			// PERFORMANCE: Eager load all relations at once
-			// Phase 3: Supports nested relations (e.g., 'user.profile.avatar')
-			// Nested eager loading is enabled by config
-			if (config('canvastack.datatables.relationships.nested_eager_loading', true)) {
-				$model_data = $model_data->with($relationNames);
-			} else {
-				// Only load first-level relationships
-				$firstLevelRelations = array_filter($relationNames, function($rel) {
-					return strpos($rel, '.') === false;
-				});
-				$model_data = $model_data->with($firstLevelRelations);
-			}
-			
-			// Log eager loading for performance monitoring
-			\Log::debug('Datatables: Applied eager loading', [
-				'table' => $table_name,
-				'relations' => $relationNames,
-				'count' => count($relationNames),
-				'nested_enabled' => config('canvastack.datatables.relationships.nested_eager_loading', true)
-			]);
+		// Filter out relations that don't exist on the model
+		// This prevents errors when using custom relational fields (via JOINs) instead of Eloquent relationships
+		$relationNames = $this->filterValidRelations($model_data, $relationNames, $table_name);
+		
+		if (empty($relationNames)) {
+			return $model_data;
 		}
+		
+		// Phase 3: Check lazy loading threshold
+		$lazyThreshold = config('canvastack.datatables.relationships.lazy_loading_threshold', 100);
+		$estimatedRows = $model_data->count();
+		
+		if ($estimatedRows > $lazyThreshold) {
+			\Log::info('Datatables: Skipping eager loading due to threshold', [
+				'table' => $table_name,
+				'rows' => $estimatedRows,
+				'threshold' => $lazyThreshold,
+				'relations' => $relationNames
+			]);
+			return $model_data; // Skip eager loading for large datasets
+		}
+		
+		// PERFORMANCE: Check if relationships cache is enabled
+		if ($this->shouldUseCache('relationships') && config('canvastack.cache.relationships.cache_definitions', true)) {
+			$cacheKey = config('canvastack.cache.prefix', 'canvastack_') . 
+			            config('canvastack.cache.relationships.key_prefix', 'relationships_') . 
+			            $table_name . '_' . md5(serialize($relationNames));
+			
+			// Phase 3: Use relationship-specific cache TTL
+			$cacheTtl = config('canvastack.datatables.relationships.relationship_cache_ttl', 
+			                   config('canvastack.cache.relationships.ttl', 3600));
+			
+			// Try to get from cache
+			$cached = \Illuminate\Support\Facades\Cache::get($cacheKey);
+			if ($cached !== null) {
+				canvastack_table_cache_monitor('get', $cacheKey, true);
+				
+				if (config('canvastack.cache.development.log_operations', false)) {
+					\Log::debug('Cache HIT: Relationships', ['table' => $table_name, 'key' => $cacheKey]);
+				}
+				
+				return $model_data->with($cached);
+			}
+			
+			canvastack_table_cache_monitor('get', $cacheKey, false);
+			
+			// Cache the relation names for future use
+			try {
+				\Illuminate\Support\Facades\Cache::put($cacheKey, $relationNames, $cacheTtl);
+			} catch (\Exception $e) {
+				error_log('Datatables::applyEagerLoading() cache write failed: ' . $e->getMessage());
+			}
+		}
+		
+		// PERFORMANCE: Eager load all relations at once
+		// Phase 3: Supports nested relations (e.g., 'user.profile.avatar')
+		// Nested eager loading is enabled by config
+		if (config('canvastack.datatables.relationships.nested_eager_loading', true)) {
+			$model_data = $model_data->with($relationNames);
+		} else {
+			// Only load first-level relationships
+			$firstLevelRelations = array_filter($relationNames, function($rel) {
+				return strpos($rel, '.') === false;
+			});
+			$model_data = $model_data->with($firstLevelRelations);
+		}
+		
+		// Log eager loading for performance monitoring
+		\Log::debug('Datatables: Applied eager loading', [
+			'table' => $table_name,
+			'relations' => $relationNames,
+			'count' => count($relationNames),
+			'nested_enabled' => config('canvastack.datatables.relationships.nested_eager_loading', true)
+		]);
 		
 		return $model_data;
 	}
@@ -2087,6 +2093,70 @@ class Datatables {
 		}
 		
 		return $optimized;
+	}
+	
+	/**
+	 * Filter relation names to only include valid Eloquent relationships
+	 * 
+	 * This prevents errors when custom relational fields (via JOINs) are used
+	 * instead of Eloquent relationships. Only relations that actually exist
+	 * on the model will be eager loaded.
+	 * 
+	 * @param mixed $model_data Eloquent model or query builder instance
+	 * @param array $relationNames List of relation names to validate
+	 * @param string $table_name Table name for logging
+	 * 
+	 * @return array Filtered list of valid relation names
+	 */
+	private function filterValidRelations(mixed $model_data, array $relationNames, string $table_name): array {
+		$validRelations = [];
+		
+		// Get the model instance to check for relationship methods
+		$modelInstance = null;
+		if (method_exists($model_data, 'getModel')) {
+			$modelInstance = $model_data->getModel();
+		} elseif (is_object($model_data) && method_exists($model_data, 'newInstance')) {
+			$modelInstance = $model_data->newInstance();
+		}
+		
+		if ($modelInstance === null) {
+			\Log::debug('Datatables: Cannot validate relations - no model instance', [
+				'table' => $table_name,
+				'relations' => $relationNames
+			]);
+			return [];
+		}
+		
+		foreach ($relationNames as $relationName) {
+			// For nested relations (e.g., 'user.profile'), check only the first level
+			$firstLevel = explode('.', $relationName)[0];
+			
+			// Check if the relationship method exists on the model
+			if (method_exists($modelInstance, $firstLevel)) {
+				try {
+					// Try to call the relationship method to verify it's a valid relationship
+					$relation = $modelInstance->{$firstLevel}();
+					
+					// Check if it returns a Relation instance
+					if ($relation instanceof \Illuminate\Database\Eloquent\Relations\Relation) {
+						$validRelations[] = $relationName;
+					}
+				} catch (\Exception $e) {
+					\Log::debug('Datatables: Relation method exists but is not a valid relationship', [
+						'table' => $table_name,
+						'relation' => $relationName,
+						'error' => $e->getMessage()
+					]);
+				}
+			} else {
+				\Log::debug('Datatables: Skipping non-existent relation (likely custom relational field via JOIN)', [
+					'table' => $table_name,
+					'relation' => $relationName
+				]);
+			}
+		}
+		
+		return $validRelations;
 	}
 	
 	/**
@@ -3590,9 +3660,14 @@ class Datatables {
 		// Parse foreign keys
 		$fKeys = [];
 		if (isset($post['_forKeys'])) {
-			$fKeys = json_decode($post['_forKeys'], true);
-			if (!is_array($fKeys)) {
-				$fKeys = [];
+			// Check if already an array (from POST body) or needs decoding (from JSON string)
+			if (is_array($post['_forKeys'])) {
+				$fKeys = $post['_forKeys'];
+			} else {
+				$fKeys = json_decode($post['_forKeys'], true);
+				if (!is_array($fKeys)) {
+					$fKeys = [];
+				}
 			}
 		}
 		

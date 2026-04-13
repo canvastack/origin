@@ -258,14 +258,20 @@ class Search {
 		
 		foreach ($data as $column => $row) {
 			$relate = $row['relate'] ?? false;
+			$type = $row['type'] ?? 'text';
 			
-			if (false === $relate) {
-				continue;
-			}
+			// Always add the field itself to the lists
+			$input_relations['lists'][] = $column;
+			$input_relations['type'][$column] = $type;
 			
-			foreach ((array)$relate as $relation) {
-				$input_relations['lists'][] = $relation;
-				$input_relations['type'][$relation] = $data[$relation]['type'] ?? 'text';
+			// If field has relations, add them too
+			if (false !== $relate && !empty($relate)) {
+				foreach ((array)$relate as $relation) {
+					if (!in_array($relation, $input_relations['lists'])) {
+						$input_relations['lists'][] = $relation;
+						$input_relations['type'][$relation] = $data[$relation]['type'] ?? 'text';
+					}
+				}
 			}
 		}
 		
@@ -447,7 +453,8 @@ class Search {
 			'allColumns_count' => count($allColumns),
 			'allColumns' => $allColumns,
 			'tableFromView' => $this->tableFromView,
-			'requested_fields' => $fields
+			'requested_fields' => $fields,
+			'has_relations' => !empty($this->filters['relations'])
 		]);
 		
 		// For views, we don't need column types - just check existence
@@ -472,8 +479,23 @@ class Search {
 		
 		$info = [];
 		foreach ($fields as $field) {
+			// Check if field exists in table columns
 			if (!empty($columns[$field])) {
 				$info[$field] = $columns[$field];
+			}
+			// If not in table, check if it's a relational field
+			elseif (!empty($this->filters['relations'])) {
+				foreach ($this->filters['relations'] as $relationKey => $relationData) {
+					if ($relationKey === $field || (isset($relationData['field_name']) && $relationData['field_name'] === $field)) {
+						// It's a relational field, use 'string' as default type
+						$info[$field] = 'string';
+						Log::debug('Search: Found relational field', [
+							'field' => $field,
+							'relation_key' => $relationKey
+						]);
+						break;
+					}
+				}
 			}
 		}
 		
@@ -490,7 +512,8 @@ class Search {
 				'table' => $table,
 				'requested_fields' => $fields,
 				'available_columns' => array_keys($columns),
-				'is_view' => $this->tableFromView
+				'is_view' => $this->tableFromView,
+				'has_relations' => !empty($this->filters['relations'])
 			]);
 		}
 		

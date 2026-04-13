@@ -362,10 +362,58 @@ class QueryBuilder {
 	public function executeSecureQuery(string $table, array $fields, string $where): array {
 		$connection = $this->config->getConnection();
 		
+		// Check if any fields are relational fields
+		$relations = $this->config->getRelations();
+		$relationalFields = [];
+		$regularFields = [];
+		
+		foreach ($fields as $field) {
+			$isRelational = false;
+			if (!empty($relations)) {
+				foreach ($relations as $relationKey => $relationData) {
+					if ($relationKey === $field || (isset($relationData['field_name']) && $relationData['field_name'] === $field)) {
+						$relationalFields[$field] = $relationData;
+						$isRelational = true;
+						break;
+					}
+				}
+			}
+			if (!$isRelational) {
+				$regularFields[] = $field;
+			}
+		}
+		
+		$results = [];
+		
+		// Process regular fields with database query
+		if (!empty($regularFields)) {
+			$results = $this->queryRegularFields($table, $regularFields, $where, $connection);
+		}
+		
+		// Process relational fields from relation_data
+		if (!empty($relationalFields)) {
+			$relationalResults = $this->extractRelationalFieldValues($relationalFields);
+			// Merge results
+			$results = array_merge($results, $relationalResults);
+		}
+		
+		return $results;
+	}
+	
+	/**
+	 * Query regular (non-relational) fields from database
+	 *
+	 * @param string $table Table name
+	 * @param array $fields Field names
+	 * @param string $where WHERE clause
+	 * @param string|null $connection Database connection
+	 * @return array Query results
+	 */
+	private function queryRegularFields(string $table, array $fields, string $where, ?string $connection): array {
 		// Sanitize table name
 		$safeTable = $this->sanitizeIdentifier($table);
 		if ($safeTable !== $table) {
-			Log::warning('[SECURITY] QueryBuilder::executeSecureQuery() - Table name sanitized', [
+			Log::warning('[SECURITY] QueryBuilder::queryRegularFields() - Table name sanitized', [
 				'original'  => $table,
 				'sanitized' => $safeTable,
 				'context'   => 'SQL injection prevention - identifier sanitization'
@@ -377,7 +425,7 @@ class QueryBuilder {
 		foreach ($fields as $field) {
 			$safeField = $this->sanitizeIdentifier($field);
 			if ($safeField !== $field) {
-				Log::warning('[SECURITY] QueryBuilder::executeSecureQuery() - Field name sanitized', [
+				Log::warning('[SECURITY] QueryBuilder::queryRegularFields() - Field name sanitized', [
 					'original'  => $field,
 					'sanitized' => $safeField,
 					'context'   => 'SQL injection prevention - identifier sanitization'
@@ -416,13 +464,52 @@ class QueryBuilder {
 			return $query->get()->toArray();
 			
 		} catch (\Exception $e) {
-			Log::error('[SECURITY] QueryBuilder::executeSecureQuery() - Query failed', [
+			Log::error('[SECURITY] QueryBuilder::queryRegularFields() - Query failed', [
 				'table'  => $safeTable,
 				'fields' => $safeFields,
 				'error'  => $e->getMessage()
 			]);
 			return [];
 		}
+	}
+	
+	/**
+	 * Extract field values from relational data
+	 *
+	 * @param array $relationalFields Relational fields with their data
+	 * @return array Extracted values in query result format
+	 */
+	private function extractRelationalFieldValues(array $relationalFields): array {
+		$results = [];
+		
+		foreach ($relationalFields as $fieldName => $relationData) {
+			if (empty($relationData['relation_data'])) {
+				Log::warning('QueryBuilder: Relational field has no relation_data', [
+					'field' => $fieldName
+				]);
+				continue;
+			}
+			
+			// Extract unique values from relation_data
+			$uniqueValues = [];
+			foreach ($relationData['relation_data'] as $record) {
+				if (isset($record['field_value'])) {
+					$value = $record['field_value'];
+					if (!in_array($value, $uniqueValues)) {
+						$uniqueValues[] = $value;
+						// Create result object matching database query format
+						$results[] = (object)[$fieldName => $value];
+					}
+				}
+			}
+			
+			Log::debug('QueryBuilder: Extracted relational field values', [
+				'field' => $fieldName,
+				'values_count' => count($uniqueValues)
+			]);
+		}
+		
+		return $results;
 	}
 	
 	/**

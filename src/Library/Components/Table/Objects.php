@@ -2877,9 +2877,22 @@ class Objects extends Builder {
 	private function check_column_exist(string $table_name, array $fields, ?string $connection = self::DEFAULT_DB_CONNECTION): array {
 		$connection = $connection ?? self::DEFAULT_DB_CONNECTION;
 		$fieldset = [];
+		
+		// Build lookup for relational fields for O(1) performance
+		$relational_fields = [];
+		if (!empty($this->relational_data)) {
+			foreach ($this->relational_data as $relData) {
+				if (!empty($relData['field_target'])) {
+					foreach ($relData['field_target'] as $fr_name => $relation_fields) {
+						$relational_fields[$fr_name] = true;
+					}
+				}
+			}
+		}
+		
 		foreach ($fields as $field) {
-			// Use cached column check for performance
-			if ($this->hasColumn($table_name, $field)) {
+			// Allow field if it's a relational field OR exists in the table
+			if (isset($relational_fields[$field]) || $this->hasColumn($table_name, $field)) {
 				$fieldset[] = $field;
 			}
 		}
@@ -3943,6 +3956,13 @@ class Objects extends Builder {
 			}
 		}
 		
+		// DEBUG: Log extracted relations
+		\Log::debug('extractRelationFields', [
+			'field_relations_keys' => array_keys($field_relations),
+			'field_relations' => $field_relations,
+			'tableName' => $this->tableName
+		]);
+		
 		return $field_relations;
 	}
 	
@@ -3956,6 +3976,12 @@ class Objects extends Builder {
 	private function identifyChangedFields(array $fields, array $field_relations): array {
 		$fieldset_changed = [];
 		
+		// DEBUG: Log untuk troubleshooting
+		\Log::debug('identifyChangedFields', [
+			'fields' => $fields,
+			'field_relations_keys' => array_keys($field_relations),
+		]);
+		
 		// Optimize: Use array_flip for O(1) lookup instead of O(n) in_array
 		$fields_lookup = array_flip($fields);
 		
@@ -3964,6 +3990,11 @@ class Objects extends Builder {
 				$fieldset_changed[$fr_name] = $fr_name;
 			}
 		}
+		
+		// DEBUG: Log hasil
+		\Log::debug('identifyChangedFields result', [
+			'fieldset_changed' => $fieldset_changed
+		]);
 		
 		return $fieldset_changed;
 	}
@@ -3976,22 +4007,18 @@ class Objects extends Builder {
 	 * @return array
 	 */
 	private function buildCheckFieldSet(array $fields, array $fieldset_changed): array {
-		$fieldset_added = $fields;
-		$checkFieldSet = array_diff($fieldset_added, $fields);
-		
 		if (empty($fieldset_changed)) {
-			return $checkFieldSet;
+			return [];
 		}
 		
 		$fieldsetChanged = [];
 		foreach ($fields as $fid => $fval) {
 			if (!empty($fieldset_changed[$fval])) {
 				$fieldsetChanged[$fid] = $fieldset_changed[$fval];
-				unset($fields[$fid]);
 			}
 		}
 		
-		return array_merge_recursive_distinct($checkFieldSet, $fieldsetChanged);
+		return $fieldsetChanged;
 	}
 	
 	/**

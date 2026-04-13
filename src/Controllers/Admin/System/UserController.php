@@ -73,11 +73,14 @@ class UserController extends Controller {
 			$this->table->relations($this->model, 'group', 'group_info', self::key_relations());
 			$this->table->relations($this->model, 'group', 'group_name', self::key_relations());
 
-			$this->table->filterGroups('username', 'selectbox', true);
-			$this->table->filterGroups('group_info', 'selectbox', true);
+			// Filter Groups - chain dari group_name ke group_info
+			// Username bisa di-search via search box, tidak perlu di filter dropdown
+			$this->table->filterGroups('group_name', 'selectbox', ['group_info']);
+			$this->table->filterGroups('group_info', 'selectbox', false);
+			
 			$this->table->orderby('id', 'DESC');
 
-			$this->table->lists($this->model_table, ['username:User', 'email', 'group_info', 'group_name', 'address', 'phone', 'expire_date', 'active']);
+			$this->table->lists($this->model_table, ['username:User', 'email', 'group_name:Group', 'group_info:Info', 'address', 'phone', 'expire_date', 'active']);
 
 			return $this->render();
 		}
@@ -122,17 +125,33 @@ class UserController extends Controller {
 	}
 	
 	private function sendEmail($to, $subject, $title, $message, $cc = []) {
-		if (!empty(canvastack_config('email.from.address'))) {
-			$this->email->to($to);
-			$this->email->subject($subject);
-			$this->email->title($title);
-			$this->email->message($message);
+		// Check if email is configured
+		if (empty(canvastack_config('email.from.address'))) {
+			return;
+		}
+		
+		try {
+			// Create Email Objects instance directly
+			$email = new \Canvastack\Origin\Library\Components\Messages\Email\Objects();
+			
+			$email->to($to);
+			$email->subject($subject);
+			$email->title($title);
+			$email->message($message);
+			
 			if (!empty($cc)) {
 				$ccMail = array_merge_recursive($cc, [canvastack_config('email.cc.address')]);
-				$this->email->cc($ccMail);
+				$email->cc($ccMail);
 			}
 			
-			$this->email->send();
+			$email->send();
+		} catch (\Exception $e) {
+			// Log error but don't fail user creation
+			\Log::error('Failed to send email', [
+				'to' => $to,
+				'subject' => $subject,
+				'error' => $e->getMessage()
+			]);
 		}
 	}
 	
@@ -198,7 +217,9 @@ class UserController extends Controller {
 		$message  = "<p>This is your user credential access{$roleInfo}:</p>";
 		$message .= "<p>Username: {$email['credential_user']}</p>";
 		$message .= "<p>Password: {$email['credential_pwd']}</p><br />";
-		$message .= "<p><strong>User Info</strong></p><br />{$email['credential_info']}";
+		if (!empty($email['credential_info'])) {
+			$message .= "<p><strong>User Info</strong></p><br />{$email['credential_info']}";
+		}
 		
 		$this->sendEmail($email['credential_email'], 'Mantra User Registration', "Hi, {$email['credential_name']}", $message, [$email['created_by_email']]);
 		
@@ -220,10 +241,30 @@ class UserController extends Controller {
 	public function edit($id) {
 		$this->setPage();
 		
+		// Ensure model_data is loaded with group relation
+		if (empty($this->model_data)) {
+			$this->model_data = User::with('group')->find($id);
+			
+			// If still not found, redirect with error
+			if (empty($this->model_data)) {
+				return redirect()->back()->with('error', 'User not found');
+			}
+		} else {
+			// Ensure group relation is loaded if model_data exists
+			if (!$this->model_data->relationLoaded('group')) {
+				$this->model_data->load('group');
+			}
+		}
+		
 		$selected_group = false;
-		foreach ($this->model_data->group as $group) {
-			$selected_group = $group->id;
-			if (true === is_multiplatform()) $platform_platforms = $group->{$this->platform_key};
+		$platform_platforms = null;
+		
+		// Check if group relation exists and is not null
+		if (!empty($this->model_data->group)) {
+			foreach ($this->model_data->group as $group) {
+				$selected_group = $group->id;
+				if (true === is_multiplatform()) $platform_platforms = $group->{$this->platform_key};
+			}
 		}
 		
 		if (intval($this->model_data->id) === intval($this->session['id'])) {

@@ -33,7 +33,13 @@ class PreferenceController extends Controller {
 			'template'         => 'required',
 			'meta_author'      => 'required',
 			'logo'             => canvastack_image_validations(5000),
-			'login_background' => canvastack_image_validations(10000)
+			'login_background' => canvastack_image_validations(10000),
+			// SMTP validations
+			'smtp_host'        => 'nullable|string|max:255',
+			'smtp_port'        => 'nullable|integer|min:1|max:65535',
+			'smtp_secure'      => 'nullable|integer|in:0,1,2',
+			'smtp_user'        => 'nullable|string|max:255',
+			'smtp_password'    => 'nullable|string|max:500',
 		]);
 	}
 	
@@ -76,11 +82,19 @@ class PreferenceController extends Controller {
 		$this->form->text('email_address', $this->model_data->email_address);
 		
 		$this->form->openTab('SMTP Setting');
-		$this->form->text('smtp_host', $this->model_data->smtp_host);
-		$this->form->text('smtp_port', $this->model_data->smtp_port);
-		$this->form->text('smtp_secure', $this->model_data->smtp_secure);
-		$this->form->text('smtp_user', $this->model_data->smtp_user);
-		$this->form->password('smtp_password');
+		$this->form->text('smtp_host', $this->model_data->smtp_host, ['placeholder' => 'smtp.gmail.com'], 'SMTP Host');
+		$this->form->number('smtp_port', $this->model_data->smtp_port, ['placeholder' => '587'], 'SMTP Port');
+		$this->form->selectbox('smtp_secure', [
+			'' => '-- Select Encryption --',
+			'0' => 'None (Not Secure)',
+			'1' => 'TLS (Recommended)',
+			'2' => 'SSL'
+		], $this->model_data->smtp_secure, [], 'SMTP Encryption');
+		$this->form->text('smtp_user', $this->model_data->smtp_user, ['placeholder' => 'your-email@example.com'], 'SMTP User');
+		$this->form->password('smtp_password', ['placeholder' => 'Leave empty to keep current password'], 'SMTP Password');
+		
+		// Add SMTP Test Button
+		$this->addSmtpTestButton();
 		
 		$this->form->openTab('Session');
 		$this->form->text('session_name', $this->model_data->session_name);
@@ -103,8 +117,157 @@ class PreferenceController extends Controller {
 	}
 	
 	public function update(Request $request, $id) {
+		// Handle SMTP password encryption
+		if ($request->filled('smtp_password')) {
+			// Encrypt password if provided
+			$request->merge([
+				'smtp_password' => canvastack_mail_encrypt_password($request->smtp_password)
+			]);
+		} else {
+			// If password is empty, remove it from request to keep existing password
+			$request->offsetUnset('smtp_password');
+		}
+		
+		// Update preference data
 		$this->update_data($request, $id, false);
 		
+		// Reload mail configuration from updated preference
+		canvastack_mail_reload_config();
+		
+		// Optional: Test SMTP connection if enabled
+		if (config('canvastack.mail.test_on_save', false) && $request->filled('smtp_host')) {
+			$testResult = canvastack_mail_test_smtp();
+			if (!$testResult['success']) {
+				// Log warning but don't fail the update
+				\Log::warning('SMTP connection test failed after preference update', [
+					'message' => $testResult['message']
+				]);
+			}
+		}
+		
 		return self::redirect('edit', $request);
+	}
+	
+	/**
+	 * Add SMTP Test Button to Form
+	 * 
+	 * Injects custom HTML for SMTP connection test button.
+	 * Button only appears when all required SMTP fields are filled.
+	 * JavaScript logic is handled in firscripts.js
+	 * 
+	 * @return void
+	 */
+	private function addSmtpTestButton(): void {
+		// Generate proper URL using Laravel route helper
+		$testUrl = route('system.config.preference.test-smtp');
+		
+		$testButtonHtml = <<<HTML
+		<div class="form-group row" id="smtp-test-container" style="display:none;" data-test-url="{$testUrl}">
+			<label class="col-md-3 control-label"></label>
+			<div class="col-md-9">
+				<button type="button" id="test-smtp-btn" class="btn btn-info">
+					<i class="fa fa-plug"></i> Test SMTP Connection
+				</button>
+				<span id="smtp-test-result" style="margin-left: 10px;"></span>
+				<div id="smtp-test-details" class="alert" style="margin-top: 10px; display:none;"></div>
+			</div>
+		</div>
+		HTML;
+		
+		$this->form->draw($testButtonHtml);
+	}
+	
+	/**
+	 * Test SMTP Connection
+	 * 
+	 * AJAX endpoint to test SMTP connection with provided credentials.
+	 * If password is empty, uses password from database.
+	 * 
+	 * @param Request $request HTTP request with SMTP credentials
+	 * @return \Illuminate\Http\JsonResponse JSON response with test result
+	 */
+	public function testSmtpConnection(Request $request) {
+		try {
+			// Validate input
+			$request->validate([
+				'smtp_host' => 'required|string|max:255',
+				'smtp_port' => 'required|integer|min:1|max:65535',
+				'smtp_secure' => 'required|integer|in:0,1,2',
+				'smtp_user' => 'required|string|max:255',
+				'smtp_password' => 'nullable|string',
+			]);
+			
+			// Map encryption integer to string
+			$encryption = match((int)$request->smtp_secure) {
+				0 => null,
+				1 => 'tls',
+				2 => 'ssl',
+				default => null,
+			};
+			
+			// Get password from request or database
+			$password = $request->smtp_password;
+			
+			// If password is empty, get from database
+			if (empty($password)) {
+				$preference = Preference::first();
+				if ($preference && !empty($preference->smtp_password)) {
+					// Decrypt password from database
+					$password = canvastack_mail_config_service()->decryptPassword($preference->smtp_password);
+				}
+			} else {
+				// Clean password (remove spaces if any)
+				$password = trim(str_replace(' ', '', $password));
+			}
+			
+			// Build test configuration
+			$testConfig = [
+				'host' => $request->smtp_host,
+				'port' => (int) $request->smtp_port,
+				'encryption' => $encryption,
+				'username' => $request->smtp_user,
+				'password' => $password,
+			];
+			
+			// Log test attempt (without password)
+			\Log::info('SMTP connection test attempt', [
+				'host' => $request->smtp_host,
+				'port' => $request->smtp_port,
+				'encryption' => $encryption,
+				'username' => $request->smtp_user,
+				'password_length' => $password ? strlen($password) : 0,
+				'password_source' => empty($request->smtp_password) ? 'database' : 'form',
+				'user_id' => session('id'),
+			]);
+			
+			// Test connection using helper
+			$result = canvastack_mail_test_smtp($testConfig);
+			
+			// Log test result
+			\Log::info('SMTP connection test result', [
+				'success' => $result['success'],
+				'message' => $result['message'],
+				'user_id' => session('id'),
+			]);
+			
+			return response()->json($result);
+			
+		} catch (\Illuminate\Validation\ValidationException $e) {
+			return response()->json([
+				'success' => false,
+				'message' => 'Validation failed: ' . implode(', ', $e->validator->errors()->all())
+			], 422);
+		} catch (\Exception $e) {
+			\Log::error('SMTP test connection error', [
+				'error' => $e->getMessage(),
+				'trace' => $e->getTraceAsString(),
+				'user_id' => session('id'),
+			]);
+			
+			return response()->json([
+				'success' => false,
+				'message' => 'Test failed: ' . $e->getMessage()
+			], 500);
+		}
 	}
 }

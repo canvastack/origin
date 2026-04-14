@@ -1498,6 +1498,12 @@ trait Action {
 		// check if any input file type submited
 		$data = $this->checkFileInputSubmited($request);
 		
+		// Convert Request object to array if needed (for error handling compatibility)
+		// Use original $request to preserve merged data
+		if ($data instanceof \Illuminate\Http\Request) {
+			$data = $request->all();
+		}
+		
 		// Wrap database operation with error handling
 		try {
 			canvastack_update($model, $data);

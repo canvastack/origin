@@ -2580,17 +2580,6 @@ if (!function_exists('internal_flag_status')) {
 if (!function_exists('canvastack_mappage_button_add')) {
 	
 	/**
-	 * Acction Buttons for Mapping Page Module
-	 * 
-	 * @param string $ajax_url
-	 * @param string $node_btn
-	 * @param string $id
-	 * @param string $target_id
-	 * @param string $second_target
-	 * 
-	 * @return string
-	 */
-	/**
 	 * Generate button add/reset for mapping page with JavaScript
 	 * 
 	 * @param string $ajax_url AJAX URL for data loading
@@ -4937,5 +4926,99 @@ if (!function_exists('canvastack_controller_retry')) {
 		
 		// Should never reach here, but return null for safety
 		return null;
+	}
+}
+
+
+if (!function_exists('canvastack_mail_config_service')) {
+	/**
+	 * Get Mail Configuration Service Instance
+	 * 
+	 * Returns singleton instance of MailConfigService for managing
+	 * dynamic SMTP configuration from database preferences.
+	 * 
+	 * @return \Canvastack\Origin\Services\MailConfigService
+	 * 
+	 * @example
+	 * // Load SMTP config from preference
+	 * canvastack_mail_config_service()->loadSmtpFromPreference();
+	 * 
+	 * // Test SMTP connection
+	 * $result = canvastack_mail_config_service()->testConnection();
+	 * if ($result['success']) {
+	 *     echo 'Connection OK';
+	 * }
+	 */
+	function canvastack_mail_config_service(): \Canvastack\Origin\Services\MailConfigService {
+		return app(\Canvastack\Origin\Services\MailConfigService::class);
+	}
+}
+
+if (!function_exists('canvastack_mail_reload_config')) {
+	/**
+	 * Reload Mail Configuration from Preference
+	 * 
+	 * Invalidates preference cache and reloads SMTP configuration
+	 * from database. Call this after updating SMTP settings in preferences.
+	 * 
+	 * @return bool True if configuration was reloaded successfully
+	 * 
+	 * @example
+	 * // After updating preference
+	 * Preference::find(1)->update($smtpData);
+	 * canvastack_mail_reload_config();
+	 */
+	function canvastack_mail_reload_config(): bool {
+		return canvastack_mail_config_service()->reloadConfig();
+	}
+}
+
+if (!function_exists('canvastack_mail_test_smtp')) {
+	/**
+	 * Test SMTP Connection
+	 * 
+	 * Tests SMTP connection with current configuration or provided config.
+	 * Returns array with 'success' boolean and 'message' string.
+	 * 
+	 * @param array|null $config Optional SMTP config to test
+	 * @return array ['success' => bool, 'message' => string]
+	 * 
+	 * @example
+	 * // Test current configuration
+	 * $result = canvastack_mail_test_smtp();
+	 * if (!$result['success']) {
+	 *     echo 'Error: ' . $result['message'];
+	 * }
+	 * 
+	 * // Test specific configuration
+	 * $result = canvastack_mail_test_smtp([
+	 *     'host' => 'smtp.gmail.com',
+	 *     'port' => 587,
+	 *     'encryption' => 'tls',
+	 *     'username' => 'user@gmail.com',
+	 *     'password' => 'password'
+	 * ]);
+	 */
+	function canvastack_mail_test_smtp(?array $config = null): array {
+		return canvastack_mail_config_service()->testConnection($config);
+	}
+}
+
+if (!function_exists('canvastack_mail_encrypt_password')) {
+	/**
+	 * Encrypt SMTP Password
+	 * 
+	 * Encrypts password before storing in database using Laravel Crypt.
+	 * Returns encrypted string or null if password is empty.
+	 * 
+	 * @param string|null $password Plain text password
+	 * @return string|null Encrypted password
+	 * 
+	 * @example
+	 * $encrypted = canvastack_mail_encrypt_password('mypassword');
+	 * Preference::find(1)->update(['smtp_password' => $encrypted]);
+	 */
+	function canvastack_mail_encrypt_password(?string $password): ?string {
+		return canvastack_mail_config_service()->encryptPassword($password);
 	}
 }

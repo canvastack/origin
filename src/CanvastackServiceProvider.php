@@ -62,6 +62,9 @@ class CanvastackServiceProvider extends ServiceProvider {
 		if (config('canvastack.cache.warming.scheduled', false)) {
 			$this->registerScheduledWarming();
 		}
+		
+		// Load SMTP configuration from preference
+		$this->loadMailConfiguration();
 	}
 
 	/**
@@ -72,6 +75,11 @@ class CanvastackServiceProvider extends ServiceProvider {
 	public function register() {
 		$this->app->singleton(CanvaStack::class, function ($app) {
 			return new CanvaStack();
+		});
+		
+		// Register Mail Configuration Service
+		$this->app->singleton(\Canvastack\Origin\Services\MailConfigService::class, function ($app) {
+			return new \Canvastack\Origin\Services\MailConfigService();
 		});
 	}
 	
@@ -135,5 +143,32 @@ class CanvastackServiceProvider extends ServiceProvider {
 			         ->withoutOverlapping()
 			         ->runInBackground();
 		});
+	}
+	
+	/**
+	 * Load Mail Configuration from Preference
+	 * 
+	 * Loads SMTP settings from database preferences and applies them
+	 * to Laravel's mail configuration at runtime.
+	 * 
+	 * @return void
+	 */
+	protected function loadMailConfiguration(): void
+	{
+		// Only load in web context, not in console (to avoid DB issues during migrations)
+		if ($this->app->runningInConsole()) {
+			return;
+		}
+		
+		try {
+			// Load SMTP configuration from preference
+			$mailService = $this->app->make(\Canvastack\Origin\Services\MailConfigService::class);
+			$mailService->loadSmtpFromPreference();
+		} catch (\Exception $e) {
+			// Log error but don't break application boot
+			\Log::warning('Failed to load mail configuration from preference', [
+				'error' => $e->getMessage(),
+			]);
+		}
 	}
 }

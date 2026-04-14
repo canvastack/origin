@@ -7,9 +7,129 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 🚀 New Features
+
+#### Added
+- **Dynamic SMTP Configuration** - Database-driven mail configuration system:
+  - New `MailConfigService` for managing SMTP settings from preferences
+  - Runtime SMTP configuration loading from database
+  - Automatic configuration reload after preference updates
+  - Fallback to .env configuration when preference settings are empty
+  - Password encryption/decryption for secure storage
+  - SMTP connection testing with detailed error messages
+  - Gmail App Password support with helpful error messages
+  - Configuration caching for improved performance
+
+- **SMTP Test Connection Feature** - Interactive SMTP testing in preference page:
+  - Real-time SMTP connection testing via AJAX
+  - Test button with loading states and visual feedback
+  - Detailed success/error messages for troubleshooting
+  - Support for testing with current or new credentials
+  - Automatic field validation before testing
+  - User-friendly error messages for common issues (authentication, connection, timeout)
+
+- **Enhanced Preference Controller** - Improved SMTP configuration UI:
+  - Better form fields with placeholders and labels
+  - Dropdown for encryption type selection (None, TLS, SSL)
+  - Number input for port with validation
+  - Password field with "keep current" option
+  - Automatic SMTP test button visibility based on field completion
+  - Comprehensive validation rules for all SMTP fields
+
+- **New Helper Functions** - Mail configuration utilities:
+  - `canvastack_mail_config_service()` - Get MailConfigService instance
+  - `canvastack_mail_reload_config()` - Reload configuration from preference
+  - `canvastack_mail_test_smtp()` - Test SMTP connection
+  - `canvastack_mail_encrypt_password()` - Encrypt password for storage
+
+- **New Configuration File** - `config/canvastack.mail.php`:
+  - `use_preference` - Enable/disable preference-based SMTP
+  - `fallback_to_env` - Fallback to .env when preference is empty
+  - `encrypt_password` - Enable password encryption
+  - `test_on_save` - Auto-test connection after saving
+  - `cache_ttl` - Configuration cache duration
+
+### 🎨 Frontend Enhancements
+
+#### Added
+- **SMTP Test JavaScript Handler** - Interactive testing functionality:
+  - Real-time field monitoring for test button visibility
+  - AJAX-based connection testing with loading states
+  - Success/error message display with icons
+  - Detailed error information in expandable alert boxes
+  - CSRF token handling for secure requests
+  - Responsive UI with smooth animations
+
+### 🔄 Refactoring
+
+#### Changed
+- **PreferenceController.php** - Major SMTP configuration enhancements:
+  - Added comprehensive SMTP field validations (host, port, secure, user, password)
+  - Enhanced form fields with better UX (placeholders, labels, dropdown)
+  - Added `testSmtpConnection()` method for AJAX testing endpoint
+  - Added `addSmtpTestButton()` method for test button injection
+  - Implemented password encryption on update
+  - Added automatic configuration reload after update
+  - Optional SMTP test on save with error logging
+  - Enhanced PHPDoc documentation with examples
+
+- **CanvastackServiceProvider.php** - Service provider improvements:
+  - Registered `MailConfigService` as singleton
+  - Added `loadMailConfiguration()` method for boot-time config loading
+  - Automatic SMTP configuration loading from preference
+  - Console context detection to avoid DB issues during migrations
+  - Error handling with graceful fallback
+
+- **Action.php** - Request handling improvement:
+  - Added Request to array conversion for error handling compatibility
+  - Preserves merged data from request
+  - Better compatibility with file upload processing
+
+- **App.php** - Helper functions organization:
+  - Removed duplicate PHPDoc for `canvastack_mappage_button_add()`
+  - Added 4 new mail configuration helper functions
+  - Comprehensive documentation with usage examples
+
+- **firscripts.js** - AJAX and SMTP test enhancements:
+  - Refactored `ajaxSelectionProcess()` to use POST body instead of URL parameters
+  - Fixed encrypted parameter handling (raw POST data, not URL encoded)
+  - Added proper JSON response handling
+  - Added error logging for debugging
+  - Implemented complete SMTP test connection handler
+  - Field monitoring for dynamic test button visibility
+  - AJAX request handling with proper error messages
+
+### 🔒 Security Enhancements
+
+#### Added
+- **Password Encryption** - Secure SMTP password storage:
+  - Laravel Crypt-based password encryption
+  - Automatic encryption on save
+  - Automatic decryption on load
+  - Backward compatibility with plain text passwords
+  - Configurable encryption enable/disable
+
+- **AJAX Security** - Improved AJAX request handling:
+  - Encrypted parameters in POST body (not URL)
+  - CSRF token validation for SMTP test endpoint
+  - Input validation for all SMTP test parameters
+  - Secure password handling (never logged)
+  - User ID logging for audit trail
+
 ### 🐛 Bug Fixes
 
 #### Fixed
+- **AJAX Parameter Handling** - Fixed encrypted parameter transmission:
+  - Changed from URL parameters to POST body for encrypted data
+  - Prevents URL length limitations
+  - Improves security by not exposing encrypted data in URLs
+  - Fixed parameter merging with form data
+
+- **Request Data Handling** - Fixed error handling compatibility:
+  - Converts Request object to array when needed
+  - Preserves merged data from request
+  - Fixes compatibility with file upload processing
+
 - **UserController.php** - Filter groups and email handling improvements:
   - Fixed filterGroups chain configuration (group_name → group_info)
   - Removed username from filter dropdown (now searchable via search box)

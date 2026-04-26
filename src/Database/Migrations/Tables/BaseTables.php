@@ -193,6 +193,25 @@ class BaseTables extends Config {
 			$table->softDeletes();
 		});
 
+		// Mail Setting Table
+		$this->schema::create('base_mail_setting', function (Blueprint $table) {
+			$this->set_engine($table, $this->setEngine);
+
+			$table->increments('id')->unsigned();
+
+			$table->integer('module_id')->unsigned()->nullable();
+			$table->string('title', 50)->nullable();
+			$table->text('mail_content_insert')->nullable();
+			$table->text('mail_content_update')->nullable();
+			$table->text('mail_content_delete')->nullable();
+			
+			$table->index('module_id');
+
+			$table->foreign('module_id')->references('id')->on('base_module')->onUpdate('cascade')->onDelete('cascade');
+
+			$table->softDeletes();
+		});
+
 		// Language Table
 		$this->schema::create('base_language', function (Blueprint $table) {
 			$this->set_engine($table, $this->setEngine);

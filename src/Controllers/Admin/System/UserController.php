@@ -60,30 +60,30 @@ class UserController extends Controller {
 	}
 	
 	public function index(): \Illuminate\View\View|\Illuminate\Http\JsonResponse|\Illuminate\Http\RedirectResponse {
-			$this->setPage();
+		$this->setPage();
 
-			if (!$this->is_root && !canvastack_string_contained($this->session['user_group'], 'admin')) {
-				return self::redirect("{$this->session['id']}/edit");
-			}
-
-			$this->table->searchable();
-			$this->table->clickable();
-			$this->table->sortable();
-
-			$this->table->relations($this->model, 'group', 'group_info', self::key_relations());
-			$this->table->relations($this->model, 'group', 'group_name', self::key_relations());
-
-			// Filter Groups - chain dari group_name ke group_info
-			// Username bisa di-search via search box, tidak perlu di filter dropdown
-			$this->table->filterGroups('group_name', 'selectbox', ['group_info']);
-			$this->table->filterGroups('group_info', 'selectbox', false);
-			
-			$this->table->orderby('id', 'DESC');
-
-			$this->table->lists($this->model_table, ['username:User', 'email', 'group_name:Group', 'group_info:Info', 'address', 'phone', 'expire_date', 'active']);
-
-			return $this->render();
+		if (!$this->is_root && !canvastack_string_contained($this->session['user_group'], 'admin')) {
+			return self::redirect("{$this->session['id']}/edit");
 		}
+
+		$this->table->searchable();
+		$this->table->clickable();
+		$this->table->sortable();
+
+		$this->table->relations($this->model, 'group', 'group_info', self::key_relations());
+		$this->table->relations($this->model, 'group', 'group_name', self::key_relations());
+
+		// Filter Groups - chain dari group_name ke group_info
+		// Username bisa di-search via search box, tidak perlu di filter dropdown
+		$this->table->filterGroups('group_name', 'selectbox', ['group_info']);
+		$this->table->filterGroups('group_info', 'selectbox', false);
+		
+		$this->table->orderby('id', 'DESC');
+
+		$this->table->lists($this->model_table, ['username:User', 'email', 'group_name:Group', 'group_info:Info', 'address', 'phone', 'expire_date', 'active']);
+
+		return $this->render();
+	}
 	
 	public function create() {
 		$this->setPage();

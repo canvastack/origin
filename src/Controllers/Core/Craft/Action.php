@@ -947,15 +947,15 @@ trait Action {
 			$this->stored_id = canvastack_insert($model, $data, true);
 		} catch (\Exception $e) {
 			// Handle database error gracefully
+			$dataKeys = is_array($data) ? array_keys($data) : (is_object($data) && method_exists($data, 'all') ? array_keys($data->all()) : ['unknown']);
+			
 			$this->handleDatabaseError($e, 'insert', [
 				'model' => is_object($model) ? get_class($model) : $model,
-				'data_keys' => array_keys($data),
+				'data_keys' => $dataKeys,
 			]);
 			
-			// Re-throw if graceful degradation is disabled
-			if (!config('canvastack.controller.error_handling.handle_database_errors', true)) {
-				throw $e;
-			}
+			// Always re-throw the exception so user can see the error
+			throw $e;
 		}
 		
 		// Clean up large variables after insert
@@ -1510,10 +1510,12 @@ trait Action {
 			$this->stored_id = intval($id);
 		} catch (\Exception $e) {
 			// Handle database error gracefully
+			$dataKeys = is_array($data) ? array_keys($data) : (is_object($data) && method_exists($data, 'all') ? array_keys($data->all()) : ['unknown']);
+			
 			$this->handleDatabaseError($e, 'update', [
 				'model' => get_class($model),
 				'id' => $id,
-				'data_keys' => array_keys($data),
+				'data_keys' => $dataKeys,
 			]);
 			
 			// Re-throw if graceful degradation is disabled
@@ -2617,7 +2619,7 @@ trait Action {
 	 * return $this->routeBackAfterAction('destroy');
 	 * ```
 	 */
-	private function routeBackAfterAction(string $function_name, int|bool $id = false): \Illuminate\Routing\Redirector|\Illuminate\Http\RedirectResponse {
+	private function routeBackAfterAction(string $function_name, int|bool|null $id = false): \Illuminate\Routing\Redirector|\Illuminate\Http\RedirectResponse {
 		if (!empty($id)) {
 			$routeBack = str_replace('.', '/', str_replace($function_name, "{$id}.edit", current_route()));
 		} else {
